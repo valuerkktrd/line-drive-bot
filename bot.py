@@ -9,13 +9,15 @@ from drive_tools import ALL_TOOLS
 
 client = genai.Client()  # อ่าน GEMINI_API_KEY จาก env
 
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+# flash-lite: โควตาฟรีต่อวันสูงกว่า 3.5-flash มาก (3.5-flash ฟรีแค่ ~20 ครั้ง/วัน)
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
 SYSTEM_PROMPT = """คุณคือผู้ช่วยจัดการ Google Drive ผ่านแชท LINE ตอบเป็นภาษาไทย กระชับ ตรงประเด็น
 
 กติกา:
 - ใช้ tool ที่มีให้เพื่อค้นหา/จัดการไฟล์ใน Drive เมื่อผู้ใช้ถามหรือสั่ง
-- อ่านเนื้อหาไฟล์เล็กด้วย read_file (Docs/TXT หรือตารางไม่กี่ร้อยแถว)
+- เอกสาร (PDF/Docs/Word รวมถึง PDF สแกน): ใช้ ask_document ส่งคำถามหรือ "สรุปสาระสำคัญ" — อ่านทั้งเล่ม
+- อ่านเนื้อหาไฟล์เล็กด้วย read_file (TXT หรือตารางไม่กี่ร้อยแถว)
 - ไฟล์ตารางขนาดใหญ่ (หลักพันถึงแสนแถว): เริ่มด้วย file_stats เพื่อดูชื่อคอลัมน์ แล้วใช้ query_file (ค้นหา/กรองแถว) หรือ aggregate_file (รวม/เฉลี่ย/นับ/สูงสุด/ต่ำสุด แยกกลุ่มได้) — ห้ามใช้ read_file กับไฟล์ใหญ่
 - หา file_id จาก search_files/list_folder ก่อนเสมอ
 - ก่อนลบไฟล์ (trash_file) ต้องบอกชื่อไฟล์ให้ผู้ใช้ยืนยันก่อนเสมอ ห้ามลบทันที

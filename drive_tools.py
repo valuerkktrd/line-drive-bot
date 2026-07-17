@@ -335,6 +335,52 @@ def read_file(file_id: str) -> str:
     return f"เนื้อหาไฟล์ '{name}':\n{text}"
 
 
+def ask_document(file_id: str, question: str) -> str:
+    """อ่านเอกสารทั้งไฟล์แล้วตอบคำถาม/สรุป (แบบ NotebookLM) — รองรับ PDF (รวมถึง
+    PDF สแกนภาษาไทย), Google Docs, Word (.docx), TXT
+    ใช้กับเอกสาร/รายงาน ไม่ใช่ตารางข้อมูลขนาดใหญ่ (ตารางใช้ query_file/aggregate_file)
+
+    Args:
+        file_id: ID ของไฟล์เอกสาร
+        question: สิ่งที่อยากรู้ เช่น "สรุปสาระสำคัญ" หรือคำถามเจาะจงจากเนื้อหา
+    """
+    from google import genai
+    from google.genai import types as gtypes
+
+    meta = drive().files().get(
+        fileId=file_id, fields="name, mimeType, size", supportsAllDrives=True
+    ).execute()
+    mt, name = meta["mimeType"], meta["name"]
+
+    if mt == "application/pdf":
+        raw = drive().files().get_media(fileId=file_id).execute()
+        part = gtypes.Part.from_bytes(data=raw, mime_type="application/pdf")
+    elif mt == "application/vnd.google-apps.document":
+        raw = drive().files().export(fileId=file_id, mimeType="application/pdf").execute()
+        part = gtypes.Part.from_bytes(data=raw, mime_type="application/pdf")
+    elif mt == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        raw = drive().files().get_media(fileId=file_id).execute()
+        part = gtypes.Part.from_bytes(
+            data=raw,
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    elif mt.startswith("text/"):
+        raw = drive().files().get_media(fileId=file_id).execute()
+        part = raw.decode("utf-8", errors="replace")[:200000]
+    else:
+        return f"ไฟล์ '{name}' ประเภท {mt} ยังใช้ ask_document ไม่ได้ (รองรับ PDF/Docs/Word/TXT)"
+
+    if len(raw) > 18_000_000:
+        return f"ไฟล์ '{name}' ใหญ่เกิน 18MB — ยังไม่รองรับ ลองแยกไฟล์เป็นส่วนๆ"
+
+    g = genai.Client()
+    resp = g.models.generate_content(
+        model=os.environ.get("GEMINI_MODEL", "gemini-3.5-flash"),
+        contents=[part, f"จากเอกสาร '{name}' นี้: {question}\nตอบเป็นภาษาไทย กระชับ อ้างอิงเนื้อหาจริงในเอกสาร"],
+    )
+    return (resp.text or "").strip() or "อ่านเอกสารแล้วแต่ไม่ได้คำตอบ ลองถามใหม่อีกครั้ง"
+
+
 def trash_file(file_id: str) -> str:
     """ย้ายไฟล์ไปถังขยะ (กู้คืนได้ใน 30 วัน) — เรียกใช้เฉพาะเมื่อผู้ใช้ยืนยันแล้วเท่านั้น
 
@@ -356,6 +402,7 @@ ALL_TOOLS = [
     rename_file,
     get_link,
     read_file,
+    ask_document,
     file_stats,
     query_file,
     aggregate_file,
