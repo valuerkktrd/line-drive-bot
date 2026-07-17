@@ -307,22 +307,18 @@ def read_file(file_id: str) -> str:
     elif mt == "application/vnd.google-apps.document":
         raw = drive().files().export(fileId=file_id, mimeType="text/plain").execute()
         text = raw.decode("utf-8", errors="replace")
-    elif mt in (
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-excel",
-    ):
-        from openpyxl import load_workbook
+    elif mt in TABLE_MIMES_XLSX:
+        import pandas as pd
 
         raw = drive().files().get_media(fileId=file_id).execute()
-        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        # calamine อ่านได้ทั้ง .xlsx และ .xls เก่า
+        sheets = pd.read_excel(io.BytesIO(raw), sheet_name=None, engine="calamine")
         lines = []
-        for ws in wb.worksheets:
-            lines.append(f"### แผ่นงาน: {ws.title}")
-            for i, row in enumerate(ws.iter_rows(values_only=True)):
-                if i >= 500:
-                    lines.append("...(ตัดที่ 500 แถว)")
-                    break
-                lines.append(",".join("" if c is None else str(c) for c in row))
+        for sheet_name, df in sheets.items():
+            lines.append(f"### แผ่นงาน: {sheet_name} ({len(df):,} แถว)")
+            lines.append(df.head(500).to_csv(index=False).rstrip())
+            if len(df) > 500:
+                lines.append("...(ตัดที่ 500 แถว)")
         text = "\n".join(lines)
     elif mt.startswith("text/") or mt in ("application/json", "application/csv"):
         raw = drive().files().get_media(fileId=file_id).execute()
