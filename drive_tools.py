@@ -154,6 +154,56 @@ def get_link(file_id: str) -> str:
     return _fmt([f])
 
 
+MAX_READ_CHARS = 40000
+
+
+def read_file(file_id: str) -> str:
+    """อ่านเนื้อหาไฟล์เป็นข้อความ เพื่อนำไปสรุป ตอบคำถาม หรือคำนวณตัวเลข
+    รองรับ: Google Sheets, Google Docs, Excel (.xlsx), CSV, TXT
+
+    Args:
+        file_id: ID ของไฟล์ที่จะอ่าน
+    """
+    meta = drive().files().get(
+        fileId=file_id, fields="name, mimeType", supportsAllDrives=True
+    ).execute()
+    mt = meta["mimeType"]
+    name = meta["name"]
+
+    if mt == "application/vnd.google-apps.spreadsheet":
+        raw = drive().files().export(fileId=file_id, mimeType="text/csv").execute()
+        text = raw.decode("utf-8", errors="replace")
+    elif mt == "application/vnd.google-apps.document":
+        raw = drive().files().export(fileId=file_id, mimeType="text/plain").execute()
+        text = raw.decode("utf-8", errors="replace")
+    elif mt in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+    ):
+        from openpyxl import load_workbook
+
+        raw = drive().files().get_media(fileId=file_id).execute()
+        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        lines = []
+        for ws in wb.worksheets:
+            lines.append(f"### แผ่นงาน: {ws.title}")
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i >= 500:
+                    lines.append("...(ตัดที่ 500 แถว)")
+                    break
+                lines.append(",".join("" if c is None else str(c) for c in row))
+        text = "\n".join(lines)
+    elif mt.startswith("text/") or mt in ("application/json", "application/csv"):
+        raw = drive().files().get_media(fileId=file_id).execute()
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        return f"ไฟล์ '{name}' เป็นประเภท {mt} — ยังอ่านเนื้อหาไม่ได้ (อ่านได้: Sheets, Docs, Excel, CSV, TXT)"
+
+    if len(text) > MAX_READ_CHARS:
+        text = text[:MAX_READ_CHARS] + f"\n...(ตัดเนื้อหา ไฟล์ยาวเกิน {MAX_READ_CHARS} ตัวอักษร)"
+    return f"เนื้อหาไฟล์ '{name}':\n{text}"
+
+
 def trash_file(file_id: str) -> str:
     """ย้ายไฟล์ไปถังขยะ (กู้คืนได้ใน 30 วัน) — เรียกใช้เฉพาะเมื่อผู้ใช้ยืนยันแล้วเท่านั้น
 
@@ -174,6 +224,7 @@ ALL_TOOLS = [
     move_file,
     rename_file,
     get_link,
+    read_file,
     trash_file,
 ]
 
