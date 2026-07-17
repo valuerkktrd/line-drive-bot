@@ -61,26 +61,50 @@ def callback():
     return "OK"
 
 
+# คำเรียกบอทในแชทกลุ่ม เช่น "บอท หาไฟล์ x" (แชทเดี่ยวไม่ต้องใช้)
+TRIGGER = os.environ.get("BOT_TRIGGER", "บอท")
+
+
+def _target_id(event) -> tuple[str, bool]:
+    """คืน (id ปลายทางสำหรับ push/ประวัติแชท, เป็นแชทกลุ่มไหม)"""
+    src = event.source
+    if src.type == "group":
+        return src.group_id, True
+    if src.type == "room":
+        return src.room_id, True
+    return src.user_id, False
+
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def on_text(event):
-    user_id = event.source.user_id
+    target, is_group = _target_id(event)
     text = event.message.text.strip()
 
+    # ในกลุ่ม: ตอบเฉพาะข้อความที่ขึ้นต้นด้วยคำเรียก ใครเรียกก็ได้
+    if is_group:
+        if not text.startswith(TRIGGER):
+            return
+        text = text[len(TRIGGER):].lstrip(" ,:").strip()
+        if not text:
+            reply_text(event.reply_token,
+                       f"เรียกผมได้เลยครับ เช่น \"{TRIGGER} หาไฟล์ราคาประเมิน\"")
+            return
+
     if text in ("/reset", "เริ่มใหม่"):
-        bot.reset(user_id)
+        bot.reset(target)
         reply_text(event.reply_token, "ล้างประวัติสนทนาแล้วครับ")
         return
 
-    # Fable 5 อาจใช้เวลาคิดนานกว่า reply token จะทัน —
+    # โมเดลอาจใช้เวลาคิดนานกว่า reply token จะทัน —
     # ตอบรับก่อน แล้วประมวลผลใน background ส่งผลผ่าน push message
     reply_text(event.reply_token, "รับทราบ กำลังดำเนินการ...")
 
     def work():
         try:
-            answer = bot.chat(user_id, text)
+            answer = bot.chat(target, text)
         except Exception as e:  # noqa: BLE001
             answer = f"เกิดข้อผิดพลาด: {e}"
-        push_text(user_id, answer)
+        push_text(target, answer)
 
     threading.Thread(target=work, daemon=True).start()
 
@@ -88,7 +112,9 @@ def on_text(event):
 @handler.add(MessageEvent, message=FileMessageContent)
 @handler.add(MessageEvent, message=ImageMessageContent)
 def on_file(event):
-    user_id = event.source.user_id
+    user_id, is_group = _target_id(event)
+    if is_group:
+        return  # ในกลุ่มไม่อัปโหลดไฟล์อัตโนมัติ (กันไฟล์คุยเล่นไหลลง Drive)
     reply_text(event.reply_token, "ได้รับไฟล์แล้ว กำลังอัปโหลดขึ้น Drive...")
 
     if isinstance(event.message, FileMessageContent):
