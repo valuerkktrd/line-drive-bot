@@ -156,6 +156,137 @@ def get_link(file_id: str) -> str:
 
 MAX_READ_CHARS = 40000
 
+# ---------- เครื่องมือวิเคราะห์ตาราง (ไฟล์ใหญ่หลักแสนแถว) ----------
+
+_CACHE_DIR = os.environ.get("TABLE_CACHE_DIR", os.path.join(os.path.dirname(__file__), "_cache"))
+
+TABLE_MIMES_XLSX = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel",
+)
+
+
+def _download_table(file_id: str):
+    """ดาวน์โหลดไฟล์ตารางลง cache ครั้งเดียว คืน (path, ชนิด csv/xlsx, ชื่อไฟล์)"""
+    meta = drive().files().get(
+        fileId=file_id, fields="name, mimeType, md5Checksum, modifiedTime",
+        supportsAllDrives=True,
+    ).execute()
+    mt, name = meta["mimeType"], meta["name"]
+    ver = (meta.get("md5Checksum") or meta.get("modifiedTime", "")).replace(":", "")
+
+    if mt == "application/vnd.google-apps.spreadsheet":
+        kind = "csv"
+    elif mt in TABLE_MIMES_XLSX:
+        kind = "xlsx"
+    elif mt.startswith("text/") or mt in ("application/csv",):
+        kind = "csv"
+    else:
+        raise ValueError(f"ไฟล์ '{name}' ประเภท {mt} ไม่ใช่ตาราง (รองรับ Sheets/Excel/CSV)")
+
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    path = os.path.join(_CACHE_DIR, f"{file_id}_{ver}.{kind}")
+    if not os.path.exists(path):
+        if mt == "application/vnd.google-apps.spreadsheet":
+            raw = drive().files().export(fileId=file_id, mimeType="text/csv").execute()
+        else:
+            raw = drive().files().get_media(fileId=file_id).execute()
+        with open(path, "wb") as f:
+            f.write(raw)
+    return path, kind, name
+
+
+def _load_df(file_id: str, sheet: str = "", columns: list | None = None):
+    import pandas as pd
+
+    path, kind, name = _download_table(file_id)
+    if kind == "xlsx":
+        df = pd.read_excel(path, sheet_name=(sheet or 0), engine="calamine",
+                           usecols=columns or None)
+    else:
+        try:
+            df = pd.read_csv(path, usecols=columns or None)
+        except UnicodeDecodeError:
+            df = pd.read_csv(path, usecols=columns or None, encoding="cp874")
+    return df, name
+
+
+def _apply_filter(df, filter_expr: str):
+    if filter_expr:
+        df = df.query(filter_expr, engine="python")
+    return df
+
+
+def file_stats(file_id: str, sheet: str = "") -> str:
+    """ดูโครงสร้างไฟล์ตาราง: จำนวนแถว รายชื่อคอลัมน์ และตัวอย่าง 5 แถวแรก
+    ใช้กับไฟล์ตารางขนาดใหญ่ก่อนเสมอ เพื่อรู้ชื่อคอลัมน์ก่อนจะ query/aggregate
+
+    Args:
+        file_id: ID ของไฟล์ (Sheets/Excel/CSV)
+        sheet: ชื่อแผ่นงานใน Excel (เว้นว่าง = แผ่นแรก)
+    """
+    df, name = _load_df(file_id, sheet)
+    cols = ", ".join(f"{c}({t})" for c, t in df.dtypes.astype(str).items())
+    sample = df.head(5).to_string(index=False)
+    return f"ไฟล์ '{name}': {len(df):,} แถว\nคอลัมน์: {cols}\nตัวอย่าง 5 แถวแรก:\n{sample}"
+
+
+def query_file(file_id: str, filter_expr: str = "", columns: str = "",
+               limit: int = 20, sheet: str = "") -> str:
+    """ค้นหา/กรองแถวจากไฟล์ตารางขนาดใหญ่ คืนเฉพาะแถวที่ตรงเงื่อนไข (ไม่เกิน limit)
+
+    Args:
+        file_id: ID ของไฟล์ (Sheets/Excel/CSV)
+        filter_expr: เงื่อนไขแบบ pandas query เช่น 'ราคา > 100000' หรือ
+            'อำเภอ == "น้ำพอง" and ราคา >= 50000' หรือ 'ชื่อ.str.contains("แปลง")'
+            (เว้นว่าง = เอาแถวแรกๆ)
+        columns: รายชื่อคอลัมน์ที่ต้องการ คั่นด้วยจุลภาค (เว้นว่าง = ทุกคอลัมน์)
+        limit: จำนวนแถวสูงสุดที่คืน (ค่าเริ่มต้น 20 สูงสุด 100)
+        sheet: ชื่อแผ่นงานใน Excel (เว้นว่าง = แผ่นแรก)
+    """
+    df, name = _load_df(file_id, sheet)
+    df = _apply_filter(df, filter_expr)
+    total = len(df)
+    if columns:
+        want = [c.strip() for c in columns.split(",")]
+        df = df[[c for c in want if c in df.columns]]
+    out = df.head(max(1, min(int(limit), 100))).to_string(index=False)
+    if len(out) > 8000:
+        out = out[:8000] + "\n...(ตัดผลลัพธ์)"
+    return f"พบ {total:,} แถวใน '{name}'\n{out}"
+
+
+def aggregate_file(file_id: str, operation: str, column: str = "",
+                   group_by: str = "", filter_expr: str = "", sheet: str = "") -> str:
+    """คำนวณสรุปจากไฟล์ตารางขนาดใหญ่ (รวม เฉลี่ย นับ ต่ำสุด สูงสุด) แยกกลุ่มได้
+
+    Args:
+        file_id: ID ของไฟล์ (Sheets/Excel/CSV)
+        operation: sum | mean | count | min | max | nunique
+        column: คอลัมน์ตัวเลขที่จะคำนวณ (count/nunique เว้นว่างได้)
+        group_by: คอลัมน์ที่ใช้แบ่งกลุ่ม เช่น 'อำเภอ' (เว้นว่าง = ทั้งไฟล์)
+        filter_expr: กรองก่อนคำนวณ แบบ pandas query (เว้นว่าง = ทั้งหมด)
+        sheet: ชื่อแผ่นงานใน Excel (เว้นว่าง = แผ่นแรก)
+    """
+    df, name = _load_df(file_id, sheet)
+    df = _apply_filter(df, filter_expr)
+    op = operation.strip().lower()
+    if op not in ("sum", "mean", "count", "min", "max", "nunique"):
+        return "operation ต้องเป็น: sum, mean, count, min, max, nunique"
+
+    if group_by:
+        g = df.groupby(group_by)
+        series = g.size() if op == "count" and not column else getattr(g[column], op)()
+        series = series.sort_values(ascending=False).head(100)
+        body = series.to_string()
+    elif op == "count" and not column:
+        body = f"{len(df):,}"
+    else:
+        body = str(getattr(df[column], op)())
+
+    cond = f" (เงื่อนไข: {filter_expr})" if filter_expr else ""
+    return f"{op} ของ '{name}'{cond}:\n{body}"
+
 
 def read_file(file_id: str) -> str:
     """อ่านเนื้อหาไฟล์เป็นข้อความ เพื่อนำไปสรุป ตอบคำถาม หรือคำนวณตัวเลข
@@ -225,6 +356,9 @@ ALL_TOOLS = [
     rename_file,
     get_link,
     read_file,
+    file_stats,
+    query_file,
+    aggregate_file,
     trash_file,
 ]
 
