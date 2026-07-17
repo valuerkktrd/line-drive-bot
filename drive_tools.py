@@ -222,7 +222,7 @@ def file_stats(file_id: str, sheet: str = "") -> str:
     ใช้กับไฟล์ตารางขนาดใหญ่ก่อนเสมอ เพื่อรู้ชื่อคอลัมน์ก่อนจะ query/aggregate
 
     Args:
-        file_id: ID ของไฟล์ (Sheets/Excel/CSV)
+        file_id: ID ของไฟล์ (Sheets / Excel ทั้ง .xlsx และ .xls เก่า / CSV)
         sheet: ชื่อแผ่นงานใน Excel (เว้นว่าง = แผ่นแรก)
     """
     df, name = _load_df(file_id, sheet)
