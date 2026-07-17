@@ -335,6 +335,126 @@ def read_file(file_id: str) -> str:
     return f"เนื้อหาไฟล์ '{name}':\n{text}"
 
 
+# ---------- รูปภาพ (กราฟ / infographic) ส่งกลับเข้า LINE ----------
+
+IMG_DIR = os.path.join(_CACHE_DIR, "img")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://line-drive-bot-e7sp.onrender.com")
+_pending_images: list[str] = []
+
+
+def _queue_image(png_bytes: bytes) -> str:
+    """เซฟรูปแล้วคิวไว้ให้ webhook ส่งเข้า LINE หลังจบคำตอบ"""
+    from uuid import uuid4
+
+    os.makedirs(IMG_DIR, exist_ok=True)
+    name = f"{uuid4().hex}.png"
+    with open(os.path.join(IMG_DIR, name), "wb") as f:
+        f.write(png_bytes)
+    url = f"{PUBLIC_BASE_URL}/img/{name}"
+    _pending_images.append(url)
+    return url
+
+
+def pop_pending_images() -> list[str]:
+    out = _pending_images[:]
+    _pending_images.clear()
+    return out
+
+
+def _thai_font():
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib import font_manager, pyplot as plt
+
+    fpath = os.path.join(os.path.dirname(__file__), "fonts", "Sarabun-Regular.ttf")
+    if os.path.exists(fpath):
+        font_manager.fontManager.addfont(fpath)
+        plt.rcParams["font.family"] = "Sarabun"
+    plt.rcParams["axes.unicode_minus"] = False
+    return plt
+
+
+def make_chart(file_id: str, chart_type: str, group_by: str,
+               value_column: str = "", operation: str = "sum",
+               filter_expr: str = "", title: str = "", sheet: str = "") -> str:
+    """สร้างกราฟรูปภาพจากข้อมูลในไฟล์ตาราง แล้วส่งรูปให้ผู้ใช้ใน LINE อัตโนมัติ
+    ตัวเลขคำนวณจากข้อมูลจริงทั้งไฟล์ (ไฟล์ใหญ่หลักแสนแถวก็ได้)
+
+    Args:
+        file_id: ID ของไฟล์ (Sheets/Excel/CSV)
+        chart_type: bar | line | pie
+        group_by: คอลัมน์แกนหมวดหมู่ เช่น 'อำเภอ'
+        value_column: คอลัมน์ตัวเลข (ถ้า operation=count เว้นว่างได้)
+        operation: sum | mean | count | min | max (ค่าเริ่มต้น sum)
+        filter_expr: กรองก่อนคำนวณ แบบ pandas query (เว้นว่าง = ทั้งหมด)
+        title: ชื่อกราฟ (ภาษาไทยได้)
+        sheet: ชื่อแผ่นงานใน Excel (เว้นว่าง = แผ่นแรก)
+    """
+    plt = _thai_font()
+
+    df, name = _load_df(file_id, sheet)
+    df = _apply_filter(df, filter_expr)
+    op = operation.strip().lower()
+    g = df.groupby(group_by)
+    series = g.size() if (op == "count" and not value_column) else getattr(g[value_column], op)()
+    series = series.sort_values(ascending=False).head(20)
+
+    from matplotlib.ticker import FuncFormatter
+
+    fig, ax = plt.subplots(figsize=(9, 5.5), dpi=140)
+    if chart_type == "pie":
+        series.plot.pie(ax=ax, autopct="%.1f%%", ylabel="")
+    elif chart_type == "line":
+        series.plot.line(ax=ax, marker="o")
+        ax.grid(alpha=0.3)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
+    else:
+        series.plot.bar(ax=ax)
+        ax.grid(axis="y", alpha=0.3)
+        ax.bar_label(ax.containers[0], fmt=lambda v: f"{v:,.0f}", fontsize=8)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
+    ax.set_title(title or f"{op} ของ {value_column or 'จำนวน'} แยกตาม {group_by}")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    _queue_image(buf.getvalue())
+    return f"สร้างกราฟจาก '{name}' เรียบร้อย รูปกำลังถูกส่งในแชท (บอกผู้ใช้สั้นๆ ว่าส่งรูปแล้ว)"
+
+
+def make_infographic(content: str) -> str:
+    """สร้างภาพ infographic สรุปเนื้อหาแบบสวยงาม (สไตล์ NotebookLM) แล้วส่งรูปให้ผู้ใช้ใน LINE
+    หมายเหตุ: ข้อความไทยในภาพอาจสะกดเพี้ยนได้ และโควตาฟรีจำกัด — ตัวเลขสำคัญให้ใช้ make_chart
+
+    Args:
+        content: สรุปหัวข้อ/ประเด็น/ตัวเลขเด่นที่จะให้ปรากฏในภาพ (เขียนเป็นข้อๆ)
+    """
+    from google import genai
+
+    g = genai.Client()
+    try:
+        resp = g.models.generate_content(
+            model=os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
+            contents=(
+                "Create a clean, modern, professional infographic poster (vertical) "
+                "summarizing the following content. Minimal flat design, clear hierarchy, "
+                "Thai language text rendered accurately:\n" + content
+            ),
+        )
+    except Exception as e:  # noqa: BLE001
+        if "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
+            return ("ยังสร้างภาพ infographic ไม่ได้: แพ็กเกจฟรีของ Gemini ไม่รวมโมเดลสร้างภาพ "
+                    "(ต้องเปิด billing ใน Google AI Studio ก่อน) — ถ้าเป็นกราฟข้อมูล ใช้ make_chart แทนได้เลย")
+        raise
+    for part in resp.candidates[0].content.parts:
+        if getattr(part, "inline_data", None) and part.inline_data.data:
+            _queue_image(part.inline_data.data)
+            return "สร้าง infographic เรียบร้อย รูปกำลังถูกส่งในแชท (บอกผู้ใช้สั้นๆ ว่าส่งรูปแล้ว)"
+    return "โมเดลรูปภาพไม่คืนรูปมา ลองปรับเนื้อหาแล้วเรียกใหม่"
+
+
 def ask_document(file_id: str, question: str) -> str:
     """อ่านเอกสารทั้งไฟล์แล้วตอบคำถาม/สรุป (แบบ NotebookLM) — รองรับ PDF (รวมถึง
     PDF สแกนภาษาไทย), Google Docs, Word (.docx), TXT
@@ -406,6 +526,8 @@ ALL_TOOLS = [
     file_stats,
     query_file,
     aggregate_file,
+    make_chart,
+    make_infographic,
     trash_file,
 ]
 

@@ -7,12 +7,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from flask import Flask, abort, request
+from flask import Flask, abort, request, send_from_directory
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     ApiClient,
     Configuration,
+    ImageMessage,
     MessagingApi,
     MessagingApiBlob,
     PushMessageRequest,
@@ -34,11 +35,12 @@ handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
 line_config = Configuration(access_token=os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
 
 
-def push_text(user_id: str, text: str) -> None:
+def push_text(user_id: str, text: str, image_urls: list[str] | None = None) -> None:
+    msgs = [TextMessage(text=text[:4900])]
+    for u in (image_urls or [])[:4]:
+        msgs.append(ImageMessage(original_content_url=u, preview_image_url=u))
     with ApiClient(line_config) as api:
-        MessagingApi(api).push_message(
-            PushMessageRequest(to=user_id, messages=[TextMessage(text=text[:4900])])
-        )
+        MessagingApi(api).push_message(PushMessageRequest(to=user_id, messages=msgs))
 
 
 def reply_text(reply_token: str, text: str) -> None:
@@ -104,7 +106,7 @@ def on_text(event):
             answer = bot.chat(target, text)
         except Exception as e:  # noqa: BLE001
             answer = f"เกิดข้อผิดพลาด: {e}"
-        push_text(target, answer)
+        push_text(target, answer, drive_tools.pop_pending_images())
 
     threading.Thread(target=work, daemon=True).start()
 
@@ -137,6 +139,11 @@ def on_file(event):
             push_text(user_id, f"อัปโหลดไม่สำเร็จ: {e}")
 
     threading.Thread(target=work, daemon=True).start()
+
+
+@app.route("/img/<path:fname>")
+def serve_image(fname):
+    return send_from_directory(drive_tools.IMG_DIR, fname, mimetype="image/png")
 
 
 @app.route("/health")
