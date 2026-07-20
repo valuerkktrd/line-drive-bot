@@ -300,6 +300,72 @@ def _load_df(file_id: str, sheet: str = "", columns: list | None = None):
     return _clean_df(df), name
 
 
+def _file_decodes(path: str, enc: str) -> bool:
+    """เช็คว่าทั้งไฟล์ decode ด้วย encoding นี้ได้ไหม แบบ stream (ไม่โหลดทั้งไฟล์ในแรม)
+    ต้อง decode ทีละก้อนด้วย incremental decoder ไม่ใช่ตัดหัวไฟล์มา decode ตรงๆ — ตัดกลาง
+    ตัวอักษรไทย (UTF-8 หลายไบต์) แล้ว decode เดี่ยวๆ จะ error ทั้งที่ทั้งไฟล์จริงๆ decode ได้ปกติ"""
+    import codecs
+
+    dec = codecs.getincrementaldecoder(enc)()
+    try:
+        with open(path, "rb") as f:
+            while True:
+                buf = f.read(65536)
+                if not buf:
+                    dec.decode(b"", final=True)
+                    return True
+                dec.decode(buf)
+    except (UnicodeDecodeError, UnicodeError):
+        return False
+
+
+def _iter_csv_chunks(path: str, columns: list | None = None, chunksize: int = 20000):
+    """อ่าน CSV/TSV เป็นชิ้นๆ (chunksize แถวต่อครั้ง) แทนโหลดทั้งไฟล์ครั้งเดียว
+    กันแรมพุ่งบนไฟล์แสนแถว (Render 512MB) — HTML table (.xls ปลอมบางแบบ) ไม่รองรับ chunk เลย fallback โหลดเต็ม"""
+    import pandas as pd
+
+    with open(path, "rb") as f:
+        head = f.read(4096)
+    line = head.split(b"\n", 1)[0].decode("utf-8", errors="replace")
+    sep = max([",", "\t", ";", "|"], key=line.count)
+    enc = next((e for e in ("utf-8-sig", "cp874", "utf-16") if _file_decodes(path, e)), "utf-8-sig")
+
+    try:
+        for chunk in pd.read_csv(path, usecols=columns or None, encoding=enc, sep=sep, chunksize=chunksize):
+            yield _clean_df(chunk)
+        return
+    except ValueError:
+        try:
+            for chunk in pd.read_csv(path, encoding=enc, sep=sep, chunksize=chunksize):
+                yield _clean_df(chunk)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+
+    df = pd.read_html(path)[0]
+    if columns:
+        df = df[[c for c in columns if c in df.columns]]
+    yield _clean_df(df)
+
+
+def _iter_table_chunks(file_id: str, sheet: str = "", columns: list | None = None, chunksize: int = 20000):
+    """ให้ (chunk_df, ชื่อไฟล์) ทีละส่วน — ใช้แทน _load_df เมื่อไฟล์อาจใหญ่มาก (file_stats/query/aggregate)"""
+    import pandas as pd
+
+    path, kind, name = _download_table(file_id)
+    if kind == "xlsx":
+        try:
+            df = pd.read_excel(path, sheet_name=(sheet or 0), engine="calamine", usecols=columns or None)
+            yield _clean_df(df), name
+            return
+        except Exception:  # noqa: BLE001
+            pass  # .xls ปลอม (จริงๆ เป็น CSV) — อ่านทาง CSV แบบ chunk ด้านล่าง
+    for chunk in _iter_csv_chunks(path, columns, chunksize):
+        yield chunk, name
+
+
 def _peek_columns(file_id: str, sheet: str = "") -> list | None:
     """อ่านแค่หัวตาราง (0 แถว) เพื่อรู้ชื่อคอลัมน์แบบประหยัดแรม — ใช้เลือก usecols ก่อนโหลดจริง
     เมื่อโหลดไม่สำเร็จคืน None (ผู้เรียกจะ fallback ไปโหลดแบบเต็มคอลัมน์เหมือนเดิม)"""
@@ -331,10 +397,14 @@ def file_stats(file_id: str, sheet: str = "") -> str:
         file_id: ID ของไฟล์ (Sheets / Excel ทั้ง .xlsx และ .xls เก่า / CSV)
         sheet: ชื่อแผ่นงานใน Excel (เว้นว่าง = แผ่นแรก)
     """
-    df, name = _load_df(file_id, sheet)
-    cols = ", ".join(f"{c}({t})" for c, t in df.dtypes.astype(str).items())
-    sample = df.head(5).to_string(index=False)
-    return f"ไฟล์ '{name}': {len(df):,} แถว\nคอลัมน์: {cols}\nตัวอย่าง 5 แถวแรก:\n{sample}"
+    total = 0
+    cols = sample = name = None
+    for chunk, name in _iter_table_chunks(file_id, sheet):
+        if cols is None:
+            cols = ", ".join(f"{c}({t})" for c, t in chunk.dtypes.astype(str).items())
+            sample = chunk.head(5).to_string(index=False)
+        total += len(chunk)
+    return f"ไฟล์ '{name}': {total:,} แถว\nคอลัมน์: {cols}\nตัวอย่าง 5 แถวแรก:\n{sample}"
 
 
 def query_file(file_id: str, filter_expr: str = "", columns: str = "",
@@ -350,13 +420,21 @@ def query_file(file_id: str, filter_expr: str = "", columns: str = "",
         limit: จำนวนแถวสูงสุดที่คืน (ค่าเริ่มต้น 20 สูงสุด 100)
         sheet: ชื่อแผ่นงานใน Excel (เว้นว่าง = แผ่นแรก)
     """
-    df, name = _load_df(file_id, sheet)
-    df = _apply_filter(df, filter_expr)
-    total = len(df)
-    if columns:
-        want = [c.strip() for c in columns.split(",")]
-        df = df[[c for c in want if c in df.columns]]
-    out = df.head(max(1, min(int(limit), 100))).to_string(index=False)
+    import pandas as pd
+
+    want = [c.strip() for c in columns.split(",")] if columns else None
+    limit = max(1, min(int(limit), 100))
+    total = 0
+    kept = []
+    name = None
+    for chunk, name in _iter_table_chunks(file_id, sheet):
+        chunk = _apply_filter(chunk, filter_expr)
+        total += len(chunk)
+        if sum(len(k) for k in kept) < limit:
+            piece = chunk[[c for c in want if c in chunk.columns]] if want else chunk
+            kept.append(piece.head(limit - sum(len(k) for k in kept)))
+    out_df = pd.concat(kept) if kept else pd.DataFrame()
+    out = out_df.to_string(index=False)
     if len(out) > 8000:
         out = out[:8000] + "\n...(ตัดผลลัพธ์)"
     return f"พบ {total:,} แถวใน '{name}'\n{out}"
@@ -374,6 +452,12 @@ def aggregate_file(file_id: str, operation: str, column: str = "",
         filter_expr: กรองก่อนคำนวณ แบบ pandas query (เว้นว่าง = ทั้งหมด)
         sheet: ชื่อแผ่นงานใน Excel (เว้นว่าง = แผ่นแรก)
     """
+    import pandas as pd
+
+    op = operation.strip().lower()
+    if op not in ("sum", "mean", "count", "min", "max", "nunique"):
+        return "operation ต้องเป็น: sum, mean, count, min, max, nunique"
+
     # อ่านเฉพาะคอลัมน์ที่ใช้ — ลดแรมมากสำหรับไฟล์ใหญ่ (สำคัญบน Render 512MB)
     needed = {c for c in (group_by, column) if c}
     if filter_expr:
@@ -382,25 +466,62 @@ def aggregate_file(file_id: str, operation: str, column: str = "",
         if header_cols:
             tokens = set(re.findall(r"[A-Za-zก-๙_][A-Za-zก-๙0-9_]*", filter_expr))
             needed |= {c for c in header_cols if c in tokens}
-        # peek ไม่สำเร็จ: ไม่รู้ว่า filter ใช้คอลัมน์ไหน เลยต้องโหลดเต็ม (เหมือนพฤติกรรมเดิม)
         usecols = list(needed) if header_cols else None
     else:
         usecols = list(needed) or None
-    df, name = _load_df(file_id, sheet, usecols)
-    df = _apply_filter(df, filter_expr)
-    op = operation.strip().lower()
-    if op not in ("sum", "mean", "count", "min", "max", "nunique"):
-        return "operation ต้องเป็น: sum, mean, count, min, max, nunique"
+
+    # ประมวลผลทีละ chunk (แถวหลักหมื่นต่อครั้ง) แล้วรวมผลบางส่วนเข้าด้วยกัน
+    # แทนโหลดทั้งไฟล์ครั้งเดียว — กันแรมพุ่งกับไฟล์แสนแถวคูณ 13-15 ไฟล์
+    name = None
+    sum_parts, cnt_parts, min_parts, max_parts, uniq_parts = [], [], [], [], []
+    for chunk, name in _iter_table_chunks(file_id, sheet, usecols):
+        chunk = _apply_filter(chunk, filter_expr)
+        if chunk.empty:
+            continue
+        g = chunk.groupby(group_by) if group_by else None
+
+        if op == "nunique":
+            key = [group_by, column] if group_by else [column]
+            uniq_parts.append(chunk[key].drop_duplicates())
+        elif op == "count" and not column:
+            cnt_parts.append(g.size() if g is not None else pd.Series([len(chunk)]))
+        elif op in ("sum", "mean"):
+            sum_parts.append(g[column].sum() if g is not None else pd.Series([chunk[column].sum()]))
+            cnt_parts.append(g[column].count() if g is not None else pd.Series([chunk[column].count()]))
+        elif op == "min":
+            min_parts.append(g[column].min() if g is not None else pd.Series([chunk[column].min()]))
+        elif op == "max":
+            max_parts.append(g[column].max() if g is not None else pd.Series([chunk[column].max()]))
+        else:  # count กับคอลัมน์ระบุ (นับที่ไม่ใช่ NaN)
+            cnt_parts.append(g[column].count() if g is not None else pd.Series([chunk[column].count()]))
+
+    def combine(parts, how):
+        if not parts:
+            return pd.Series(dtype="float64")
+        s = pd.concat(parts)
+        return getattr(s.groupby(level=0), how)() if group_by else pd.Series([getattr(s, how)()])
+
+    if op == "nunique":
+        if not uniq_parts:
+            result = pd.Series(dtype="float64")
+        else:
+            u = pd.concat(uniq_parts).drop_duplicates()
+            result = u.groupby(group_by)[column].nunique() if group_by else pd.Series([u[column].nunique()])
+    elif op == "sum":
+        result = combine(sum_parts, "sum")
+    elif op == "mean":
+        result = combine(sum_parts, "sum") / combine(cnt_parts, "sum")
+    elif op == "min":
+        result = combine(min_parts, "min")
+    elif op == "max":
+        result = combine(max_parts, "max")
+    else:  # count
+        result = combine(cnt_parts, "sum")
 
     if group_by:
-        g = df.groupby(group_by)
-        series = g.size() if op == "count" and not column else getattr(g[column], op)()
-        series = series.sort_values(ascending=False).head(100)
-        body = series.to_string()
-    elif op == "count" and not column:
-        body = f"{len(df):,}"
+        body = result.sort_values(ascending=False).head(100).to_string()
     else:
-        body = str(getattr(df[column], op)())
+        body = str(result.iloc[0]) if len(result) else "NaN"
 
     cond = f" (เงื่อนไข: {filter_expr})" if filter_expr else ""
     return f"{op} ของ '{name}'{cond}:\n{body}"
