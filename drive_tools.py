@@ -21,6 +21,7 @@ if not os.path.exists(TOKEN_FILE) and os.environ.get("GOOGLE_TOKEN_JSON"):
         _f.write(os.environ["GOOGLE_TOKEN_JSON"])
 
 _service = None
+_sheets_service = None
 
 
 def _creds():
@@ -43,6 +44,41 @@ def drive():
     if _service is None:
         _service = build("drive", "v3", credentials=_creds())
     return _service
+
+
+def sheets():
+    global _sheets_service
+    if _sheets_service is None:
+        _sheets_service = build("sheets", "v4", credentials=_creds())
+    return _sheets_service
+
+
+def _export_big_sheet_csv(file_id: str, path: str) -> None:
+    """Google Sheets ใหญ่เกินลิมิต export 10MB — ดึงผ่าน Sheets API ทีละช่วงแล้วเขียนเป็น CSV"""
+    import csv
+
+    meta = sheets().spreadsheets().get(
+        spreadsheetId=file_id,
+        fields="sheets(properties(title,gridProperties(rowCount)))",
+    ).execute()
+    props = meta["sheets"][0]["properties"]
+    title = props["title"]
+    total_rows = props["gridProperties"]["rowCount"]
+
+    chunk = 20000
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        r = 1
+        while r <= total_rows:
+            rng = f"'{title}'!A{r}:AZ{min(r + chunk - 1, total_rows)}"
+            vals = sheets().spreadsheets().values().get(
+                spreadsheetId=file_id, range=rng,
+                valueRenderOption="UNFORMATTED_VALUE",
+            ).execute().get("values", [])
+            if not vals:
+                break
+            w.writerows(vals)
+            r += chunk
 
 
 FILE_FIELDS = "id, name, mimeType, modifiedTime, size, parents, webViewLink"
@@ -188,11 +224,19 @@ def _download_table(file_id: str):
     path = os.path.join(_CACHE_DIR, f"{file_id}_{ver}.{kind}")
     if not os.path.exists(path):
         if mt == "application/vnd.google-apps.spreadsheet":
-            raw = drive().files().export(fileId=file_id, mimeType="text/csv").execute()
+            try:
+                raw = drive().files().export(fileId=file_id, mimeType="text/csv").execute()
+                with open(path, "wb") as f:
+                    f.write(raw)
+            except Exception as e:  # noqa: BLE001
+                if "exportSizeLimit" in str(e) or "too large" in str(e).lower():
+                    _export_big_sheet_csv(file_id, path)  # Sheets ใหญ่เกิน 10MB
+                else:
+                    raise
         else:
             raw = drive().files().get_media(fileId=file_id).execute()
-        with open(path, "wb") as f:
-            f.write(raw)
+            with open(path, "wb") as f:
+                f.write(raw)
     return path, kind, name
 
 
