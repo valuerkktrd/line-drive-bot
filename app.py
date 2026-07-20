@@ -67,6 +67,17 @@ def callback():
 TRIGGER = os.environ.get("BOT_TRIGGER", "บอท")
 
 
+def _strip_self_mention(event, text: str):
+    """ถ้าข้อความ @mention ตัวบอท คืนข้อความที่ตัดส่วน mention ออกแล้ว; ไม่ได้ mention คืน None"""
+    mention = getattr(event.message, "mention", None)
+    if not mention or not mention.mentionees:
+        return None
+    for m in mention.mentionees:
+        if getattr(m, "is_self", False):
+            return (text[:m.index] + text[m.index + m.length:]).strip()
+    return None
+
+
 def _target_id(event) -> tuple[str, bool]:
     """คืน (id ปลายทางสำหรับ push/ประวัติแชท, เป็นแชทกลุ่มไหม)"""
     src = event.source
@@ -82,14 +93,18 @@ def on_text(event):
     target, is_group = _target_id(event)
     text = event.message.text.strip()
 
-    # ในกลุ่ม: ตอบเฉพาะข้อความที่ขึ้นต้นด้วยคำเรียก ใครเรียกก็ได้
+    # ในกลุ่ม: ตอบเฉพาะเมื่อถูก @mention หรือขึ้นต้นด้วยคำเรียก — ใครเรียกก็ได้
     if is_group:
-        if not text.startswith(TRIGGER):
+        mentioned = _strip_self_mention(event, text)
+        if mentioned is not None:
+            text = mentioned
+        elif text.startswith(TRIGGER):
+            text = text[len(TRIGGER):].lstrip(" ,:").strip()
+        else:
             return
-        text = text[len(TRIGGER):].lstrip(" ,:").strip()
         if not text:
             reply_text(event.reply_token,
-                       f"เรียกผมได้เลยครับ เช่น \"{TRIGGER} หาไฟล์ราคาประเมิน\"")
+                       f"เรียกผมได้เลยครับ เช่น \"{TRIGGER} หาไฟล์ราคาประเมิน\" หรือแท็กผมพร้อมคำถาม")
             return
 
     if text in ("/reset", "เริ่มใหม่"):
