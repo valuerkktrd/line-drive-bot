@@ -197,17 +197,26 @@ def _download_table(file_id: str):
 
 
 def _read_csv_flex(path: str, columns: list | None = None):
-    """อ่าน CSV/TSV หลาย encoding; ท้ายสุดลองตาราง HTML (ไฟล์ .xls ปลอมจากระบบราชการ)"""
+    """อ่าน CSV/TSV หลาย encoding; ท้ายสุดลองตาราง HTML (ไฟล์ .xls ปลอมจากระบบราชการ)
+    ใช้ C engine (ประหยัดแรม — สำคัญบน Render 512MB) โดยเดา delimiter จากบรรทัดแรกเอง"""
     import pandas as pd
+
+    with open(path, "rb") as f:
+        head = f.read(4096)
+    line = head.split(b"\n", 1)[0].decode("utf-8", errors="replace")
+    sep = max([",", "\t", ";", "|"], key=line.count)
 
     for enc in ("utf-8-sig", "cp874", "utf-16"):
         try:
-            return pd.read_csv(path, usecols=columns or None, encoding=enc,
-                               sep=None, engine="python")
+            return pd.read_csv(path, usecols=columns or None, encoding=enc, sep=sep)
         except (UnicodeDecodeError, UnicodeError):
             continue
-        except pd.errors.ParserError:
-            break
+        except ValueError:
+            # usecols ไม่ตรง หรือ parse พัง — ลองแบบเต็มก่อนจะไป HTML
+            try:
+                return pd.read_csv(path, encoding=enc, sep=sep)
+            except Exception:  # noqa: BLE001
+                break
     return pd.read_html(path)[0]
 
 
@@ -302,7 +311,11 @@ def aggregate_file(file_id: str, operation: str, column: str = "",
         filter_expr: กรองก่อนคำนวณ แบบ pandas query (เว้นว่าง = ทั้งหมด)
         sheet: ชื่อแผ่นงานใน Excel (เว้นว่าง = แผ่นแรก)
     """
-    df, name = _load_df(file_id, sheet)
+    # ถ้าไม่มี filter อ่านเฉพาะคอลัมน์ที่ใช้ — ลดแรมมากสำหรับไฟล์ใหญ่
+    usecols = None
+    if not filter_expr:
+        usecols = [c for c in {group_by, column} if c] or None
+    df, name = _load_df(file_id, sheet, usecols)
     df = _apply_filter(df, filter_expr)
     op = operation.strip().lower()
     if op not in ("sum", "mean", "count", "min", "max", "nunique"):
@@ -446,6 +459,49 @@ def make_chart(file_id: str, chart_type: str, group_by: str,
     return f"สร้างกราฟจาก '{name}' เรียบร้อย รูปกำลังถูกส่งในแชท (บอกผู้ใช้สั้นๆ ว่าส่งรูปแล้ว)"
 
 
+def make_chart_from_data(labels: list[str], values: list[float], chart_type: str = "bar",
+                         title: str = "", value_label: str = "") -> str:
+    """วาดกราฟจากตัวเลขที่รวบรวม/คำนวณมาแล้ว แล้วส่งรูปให้ผู้ใช้ใน LINE
+    ใช้เมื่อข้อมูลมาจากหลายไฟล์ หรือคำนวณเสร็จแล้วด้วย tool อื่น (เช่น เทียบรายสาขาข้ามไฟล์)
+
+    Args:
+        labels: ชื่อแต่ละแท่ง/จุด เช่น ["สาขา 40010000", "สาขา 40030000"]
+        values: ตัวเลขตามลำดับเดียวกับ labels
+        chart_type: bar | line | pie
+        title: ชื่อกราฟ (ภาษาไทยได้)
+        value_label: หน่วย/คำอธิบายค่า เช่น "จำนวนแปลง"
+    """
+    import pandas as pd
+    from matplotlib.ticker import FuncFormatter
+
+    plt = _thai_font()
+    series = pd.Series(list(values), index=list(labels))
+
+    fig, ax = plt.subplots(figsize=(9, 5.5), dpi=140)
+    if chart_type == "pie":
+        series.plot.pie(ax=ax, autopct="%.1f%%", ylabel="")
+    elif chart_type == "line":
+        series.plot.line(ax=ax, marker="o")
+        ax.grid(alpha=0.3)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
+    else:
+        series.plot.bar(ax=ax)
+        ax.grid(axis="y", alpha=0.3)
+        ax.bar_label(ax.containers[0], fmt=lambda v: f"{v:,.0f}", fontsize=8)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
+    if value_label:
+        ax.set_ylabel(value_label)
+    ax.set_title(title or value_label or "กราฟสรุป")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    _queue_image(buf.getvalue())
+    return "สร้างกราฟเรียบร้อย รูปกำลังถูกส่งในแชท (บอกผู้ใช้สั้นๆ ว่าส่งรูปแล้ว)"
+
+
 def make_infographic(content: str) -> str:
     """สร้างภาพ infographic สรุปเนื้อหาแบบสวยงาม (สไตล์ NotebookLM) แล้วส่งรูปให้ผู้ใช้ใน LINE
     หมายเหตุ: ข้อความไทยในภาพอาจสะกดเพี้ยนได้ และโควตาฟรีจำกัด — ตัวเลขสำคัญให้ใช้ make_chart
@@ -549,6 +605,7 @@ ALL_TOOLS = [
     query_file,
     aggregate_file,
     make_chart,
+    make_chart_from_data,
     make_infographic,
     trash_file,
 ]
