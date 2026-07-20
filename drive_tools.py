@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import re
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -240,7 +241,7 @@ def _download_table(file_id: str):
     return path, kind, name
 
 
-def _read_csv_flex(path: str, columns: list | None = None):
+def _read_csv_flex(path: str, columns: list | None = None, nrows: int | None = None):
     """อ่าน CSV/TSV หลาย encoding; ท้ายสุดลองตาราง HTML (ไฟล์ .xls ปลอมจากระบบราชการ)
     ใช้ C engine (ประหยัดแรม — สำคัญบน Render 512MB) โดยเดา delimiter จากบรรทัดแรกเอง"""
     import pandas as pd
@@ -252,16 +253,17 @@ def _read_csv_flex(path: str, columns: list | None = None):
 
     for enc in ("utf-8-sig", "cp874", "utf-16"):
         try:
-            return pd.read_csv(path, usecols=columns or None, encoding=enc, sep=sep)
+            return pd.read_csv(path, usecols=columns or None, encoding=enc, sep=sep, nrows=nrows)
         except (UnicodeDecodeError, UnicodeError):
             continue
         except ValueError:
             # usecols ไม่ตรง หรือ parse พัง — ลองแบบเต็มก่อนจะไป HTML
             try:
-                return pd.read_csv(path, encoding=enc, sep=sep)
+                return pd.read_csv(path, encoding=enc, sep=sep, nrows=nrows)
             except Exception:  # noqa: BLE001
                 break
-    return pd.read_html(path)[0]
+    df = pd.read_html(path)[0]
+    return df.head(nrows) if nrows is not None else df
 
 
 def _clean_df(df):
@@ -296,6 +298,23 @@ def _load_df(file_id: str, sheet: str = "", columns: list | None = None):
     else:
         df = _read_csv_flex(path, columns)
     return _clean_df(df), name
+
+
+def _peek_columns(file_id: str, sheet: str = "") -> list | None:
+    """อ่านแค่หัวตาราง (0 แถว) เพื่อรู้ชื่อคอลัมน์แบบประหยัดแรม — ใช้เลือก usecols ก่อนโหลดจริง
+    เมื่อโหลดไม่สำเร็จคืน None (ผู้เรียกจะ fallback ไปโหลดแบบเต็มคอลัมน์เหมือนเดิม)"""
+    import pandas as pd
+
+    try:
+        path, kind, name = _download_table(file_id)
+        if kind == "xlsx":
+            try:
+                return list(pd.read_excel(path, sheet_name=(sheet or 0), engine="calamine", nrows=0).columns)
+            except Exception:
+                pass
+        return list(_read_csv_flex(path, nrows=0).columns)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _apply_filter(df, filter_expr: str):
@@ -355,10 +374,18 @@ def aggregate_file(file_id: str, operation: str, column: str = "",
         filter_expr: กรองก่อนคำนวณ แบบ pandas query (เว้นว่าง = ทั้งหมด)
         sheet: ชื่อแผ่นงานใน Excel (เว้นว่าง = แผ่นแรก)
     """
-    # ถ้าไม่มี filter อ่านเฉพาะคอลัมน์ที่ใช้ — ลดแรมมากสำหรับไฟล์ใหญ่
-    usecols = None
-    if not filter_expr:
-        usecols = [c for c in {group_by, column} if c] or None
+    # อ่านเฉพาะคอลัมน์ที่ใช้ — ลดแรมมากสำหรับไฟล์ใหญ่ (สำคัญบน Render 512MB)
+    needed = {c for c in (group_by, column) if c}
+    if filter_expr:
+        # มี filter: ต้องรู้ว่า filter อ้างคอลัมน์ไหนด้วย — peek หัวตารางก่อน (ประหยัดกว่าโหลดเต็ม)
+        header_cols = _peek_columns(file_id, sheet)
+        if header_cols:
+            tokens = set(re.findall(r"[A-Za-zก-๙_][A-Za-zก-๙0-9_]*", filter_expr))
+            needed |= {c for c in header_cols if c in tokens}
+        # peek ไม่สำเร็จ: ไม่รู้ว่า filter ใช้คอลัมน์ไหน เลยต้องโหลดเต็ม (เหมือนพฤติกรรมเดิม)
+        usecols = list(needed) if header_cols else None
+    else:
+        usecols = list(needed) or None
     df, name = _load_df(file_id, sheet, usecols)
     df = _apply_filter(df, filter_expr)
     op = operation.strip().lower()
