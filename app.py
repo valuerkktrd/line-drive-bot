@@ -1,7 +1,9 @@
 """LINE webhook server — รับข้อความ/ไฟล์จาก LINE แล้วส่งต่อให้ Claude จัดการ Drive"""
 
+import mimetypes
 import os
 import threading
+from collections import defaultdict
 
 from dotenv import load_dotenv
 
@@ -66,6 +68,10 @@ def callback():
 # คำเรียกบอทในแชทกลุ่ม เช่น "บอท หาไฟล์ x" (แชทเดี่ยวไม่ต้องใช้)
 TRIGGER = os.environ.get("BOT_TRIGGER", "บอท")
 
+# จำชื่อไฟล์ล่าสุดที่ถูกส่งในแต่ละกลุ่ม (message_id -> ชื่อไฟล์) ไว้ใช้ตอนมีคน reply สั่งเก็บ
+_recent_group_files: dict[str, dict] = defaultdict(dict)
+_RECENT_FILES_MAX = 100
+
 
 def _strip_self_mention(event, text: str):
     """ถ้าข้อความ @mention ตัวบอท คืนข้อความที่ตัดส่วน mention ออกแล้ว; ไม่ได้ mention คืน None"""
@@ -116,9 +122,27 @@ def on_text(event):
     # ตอบรับก่อน แล้วประมวลผลใน background ส่งผลผ่าน push message
     reply_text(event.reply_token, "รับทราบ กำลังดำเนินการ...")
 
+    quoted_id = getattr(event.message, "quoted_message_id", None)
+
     def work():
+        prefix = ""
+        # ผู้ใช้ reply ถึงไฟล์ในกลุ่มแล้วสั่งบอท -> ดึงไฟล์นั้นอัปขึ้น Drive ให้ก่อน
+        if is_group and quoted_id:
+            try:
+                with ApiClient(line_config) as api:
+                    data = MessagingApiBlob(api).get_message_content(quoted_id)
+                fname = _recent_group_files.get(target, {}).get(quoted_id, "ไฟล์แนบจากแชท")
+                mime = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+                f = drive_tools.upload_bytes(bytes(data), fname, mime)
+                prefix = (f"(ระบบ: ผู้ใช้ตอบกลับถึงไฟล์แนบในแชท ระบบบันทึกลง Drive แล้ว "
+                          f"ชื่อ '{f['name']}' file_id={f['id']} ลิงก์ {f.get('webViewLink', '')} "
+                          f"— ทำตามคำสั่งของผู้ใช้ต่อ เช่น ยืนยันการเก็บ ย้ายโฟลเดอร์ หรือสรุปเนื้อหา) ")
+            except Exception as e:  # noqa: BLE001
+                prefix = ("(ระบบ: ผู้ใช้ตอบกลับถึงไฟล์แนบแต่ระบบดึงไฟล์ไม่สำเร็จ "
+                          f"({e}) — แจ้งผู้ใช้ว่าไฟล์อาจเก่าเกินไปหรือถูกส่งก่อนบอทเข้ากลุ่ม "
+                          "ให้ลองส่งไฟล์นั้นเข้ามาใหม่) ")
         try:
-            answer = bot.chat(target, text)
+            answer = bot.chat(target, prefix + text)
         except Exception as e:  # noqa: BLE001
             answer = f"เกิดข้อผิดพลาด: {e}"
         push_text(target, answer, drive_tools.pop_pending_images())
@@ -131,7 +155,16 @@ def on_text(event):
 def on_file(event):
     user_id, is_group = _target_id(event)
     if is_group:
-        return  # ในกลุ่มไม่อัปโหลดไฟล์อัตโนมัติ (กันไฟล์คุยเล่นไหลลง Drive)
+        # ในกลุ่มไม่อัปโหลดอัตโนมัติ (กันไฟล์คุยเล่นไหลลง Drive)
+        # แต่จำชื่อไฟล์ไว้ เผื่อมีคน reply สั่ง "เก็บไฟล์นี้"
+        fname = (event.message.file_name
+                 if isinstance(event.message, FileMessageContent)
+                 else f"image_{event.message.id}.jpg")
+        files = _recent_group_files[user_id]
+        files[event.message.id] = fname
+        while len(files) > _RECENT_FILES_MAX:
+            files.pop(next(iter(files)))
+        return
     reply_text(event.reply_token, "ได้รับไฟล์แล้ว กำลังอัปโหลดขึ้น Drive...")
 
     if isinstance(event.message, FileMessageContent):
