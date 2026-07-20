@@ -196,19 +196,53 @@ def _download_table(file_id: str):
     return path, kind, name
 
 
+def _read_csv_flex(path: str, columns: list | None = None):
+    """อ่าน CSV/TSV หลาย encoding; ท้ายสุดลองตาราง HTML (ไฟล์ .xls ปลอมจากระบบราชการ)"""
+    import pandas as pd
+
+    for enc in ("utf-8-sig", "cp874", "utf-16"):
+        try:
+            return pd.read_csv(path, usecols=columns or None, encoding=enc,
+                               sep=None, engine="python")
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+        except pd.errors.ParserError:
+            break
+    return pd.read_html(path)[0]
+
+
+def _clean_df(df):
+    """ล้างค่าแบบ export ราชการ: ="1234" -> 1234, 'null' -> NaN, แปลงคอลัมน์เลขให้เป็นตัวเลข"""
+    import pandas as pd
+
+    df = df.replace("null", pd.NA)
+    for c in df.columns:
+        if df[c].dtype == object or pd.api.types.is_string_dtype(df[c]):
+            df[c] = df[c].map(
+                lambda v: v[2:-1] if isinstance(v, str) and v.startswith('="') and v.endswith('"') else v
+            )
+            non_na = df[c].dropna()
+            if len(non_na):
+                conv = pd.to_numeric(non_na, errors="coerce")
+                if conv.notna().all():
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
 def _load_df(file_id: str, sheet: str = "", columns: list | None = None):
     import pandas as pd
 
     path, kind, name = _download_table(file_id)
     if kind == "xlsx":
-        df = pd.read_excel(path, sheet_name=(sheet or 0), engine="calamine",
-                           usecols=columns or None)
-    else:
         try:
-            df = pd.read_csv(path, usecols=columns or None)
-        except UnicodeDecodeError:
-            df = pd.read_csv(path, usecols=columns or None, encoding="cp874")
-    return df, name
+            df = pd.read_excel(path, sheet_name=(sheet or 0), engine="calamine",
+                               usecols=columns or None)
+        except Exception:
+            # .xls ปลอม (จริงๆ เป็น CSV หรือ HTML) — พบบ่อยในไฟล์ export จากระบบราชการ
+            df = _read_csv_flex(path, columns)
+    else:
+        df = _read_csv_flex(path, columns)
+    return _clean_df(df), name
 
 
 def _apply_filter(df, filter_expr: str):
@@ -308,18 +342,10 @@ def read_file(file_id: str) -> str:
         raw = drive().files().export(fileId=file_id, mimeType="text/plain").execute()
         text = raw.decode("utf-8", errors="replace")
     elif mt in TABLE_MIMES_XLSX:
-        import pandas as pd
-
-        raw = drive().files().get_media(fileId=file_id).execute()
-        # calamine อ่านได้ทั้ง .xlsx และ .xls เก่า
-        sheets = pd.read_excel(io.BytesIO(raw), sheet_name=None, engine="calamine")
-        lines = []
-        for sheet_name, df in sheets.items():
-            lines.append(f"### แผ่นงาน: {sheet_name} ({len(df):,} แถว)")
-            lines.append(df.head(500).to_csv(index=False).rstrip())
-            if len(df) > 500:
-                lines.append("...(ตัดที่ 500 แถว)")
-        text = "\n".join(lines)
+        df, _ = _load_df(file_id)  # รองรับ .xlsx / .xls เก่า / .xls ปลอมที่เป็น CSV
+        text = f"({len(df):,} แถว)\n" + df.head(500).to_csv(index=False).rstrip()
+        if len(df) > 500:
+            text += "\n...(ตัดที่ 500 แถว)"
     elif mt.startswith("text/") or mt in ("application/json", "application/csv"):
         raw = drive().files().get_media(fileId=file_id).execute()
         text = raw.decode("utf-8", errors="replace")
