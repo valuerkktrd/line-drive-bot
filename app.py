@@ -123,6 +123,16 @@ def on_text(event):
     reply_text(event.reply_token, "รับทราบ กำลังดำเนินการ...")
 
     quoted_id = getattr(event.message, "quoted_message_id", None)
+    done = threading.Event()
+
+    def heartbeat():
+        # ถ้างานเกิน 75 วิ แจ้งผู้ใช้ว่ายังทำอยู่ (งานหลายไฟล์รอบแรกใช้เวลาหลายนาที)
+        if not done.wait(75):
+            try:
+                push_text(target, "ยังดำเนินการอยู่ครับ งานนี้ต้องอ่านข้อมูลหลายไฟล์ "
+                                  "อาจใช้เวลา 2-5 นาที เดี๋ยวส่งผลให้ทันทีที่เสร็จ")
+            except Exception:  # noqa: BLE001
+                pass
 
     def work():
         prefix = ""
@@ -145,8 +155,10 @@ def on_text(event):
             answer = bot.chat(target, prefix + text)
         except Exception as e:  # noqa: BLE001
             answer = f"เกิดข้อผิดพลาด: {e}"
+        done.set()
         push_text(target, answer, drive_tools.pop_pending_images())
 
+    threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=work, daemon=True).start()
 
 
