@@ -193,12 +193,14 @@ def on_text(event):
                 prefix = ("(ระบบ: ผู้ใช้ตอบกลับถึงไฟล์แนบแต่ระบบดึงไฟล์ไม่สำเร็จ "
                           f"({e}) — แจ้งผู้ใช้ว่าไฟล์อาจเก่าเกินไปหรือถูกส่งก่อนบอทเข้ากลุ่ม "
                           "ให้ลองส่งไฟล์นั้นเข้ามาใหม่) ")
+        print(f"[work-start] rss={drive_tools._rss_mb():.0f}MB target={target} text={text[:80]!r}", flush=True)
         try:
             answer = bot.chat(target, prefix + text)
         except Exception as e:  # noqa: BLE001
             answer = f"เกิดข้อผิดพลาด: {e}"
         finally:
             _finish(target)
+        print(f"[work-done]  rss={drive_tools._rss_mb():.0f}MB target={target}", flush=True)
         done.set()
         push_text(target, answer, drive_tools.pop_pending_images())
 

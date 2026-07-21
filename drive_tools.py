@@ -19,6 +19,39 @@ def _release_memory():
     except Exception:  # noqa: BLE001
         pass  # Windows/mac ไม่มี libc.so.6 (dev เครื่อง) — ข้ามไปเฉยๆ ไม่กระทบการทำงาน
 
+
+def _rss_mb() -> float:
+    """หน่วยความจำจริงของ process ตอนนี้ (MB) — อ่านจาก /proc (Linux เท่านั้น, ใช้ได้บน Render)"""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except Exception:  # noqa: BLE001
+        pass
+    return -1.0
+
+
+def _instrumented(fn):
+    """log เข้า/ออกของแต่ละ tool call พร้อม RSS ปัจจุบัน — ไปโผล่ใน Render Application Logs
+    เอาไว้หา call สุดท้ายที่ค้าง (ไม่มีบรรทัด done ตามมา) เวลา process โดน OOM kill"""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        tag = f"{fn.__name__}({', '.join(map(repr, args))}{', ' if args and kwargs else ''}{', '.join(f'{k}={v!r}' for k, v in kwargs.items())})"
+        print(f"[tool-start] rss={_rss_mb():.0f}MB {tag}", flush=True)
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            print(f"[tool-error] rss={_rss_mb():.0f}MB {fn.__name__} -> {e!r}", flush=True)
+            raise
+        print(f"[tool-done]  rss={_rss_mb():.0f}MB {fn.__name__} -> {len(str(result))} chars", flush=True)
+        return result
+
+    return wrapper
+
+
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -217,6 +250,35 @@ TABLE_MIMES_XLSX = (
 )
 
 
+_CACHE_MAX_BYTES = 100 * 1024 * 1024  # 100MB
+
+
+def _evict_cache_if_needed(max_bytes: int = _CACHE_MAX_BYTES) -> None:
+    """ไฟล์ตารางที่โหลดแคชไว้ใน _CACHE_DIR ไม่เคยถูกลบมาก่อน — ทดสอบเจอสะสมได้ถึง 165MB/24 ไฟล์
+    บน container ที่ Render จำกัดแรมด้วย cgroup, page cache ของไฟล์ในดิสก์นับรวมในโควตาแรม 512MB ด้วย
+    (ไม่ใช่แค่ heap ของ python) — ต่อให้ pandas อ่านแบบ chunk ประหยัดแรมแค่ไหน ถ้าดาวน์โหลด+แคช
+    ไฟล์ 10-15 ไฟล์ (ไฟล์ละไม่กี่ MB ถึง 15MB) สะสมไม่มีเพดาน ก็ดันแรมรวมของ container เกินได้เอง
+    ไล่ลบไฟล์เก่าสุดก่อน (LRU) จนขนาดรวมต่ำกว่าเพดาน"""
+    try:
+        entries = []
+        for fname in os.listdir(_CACHE_DIR):
+            p = os.path.join(_CACHE_DIR, fname)
+            if os.path.isfile(p):
+                entries.append((os.path.getmtime(p), os.path.getsize(p), p))
+        entries.sort()  # เก่าสุด (mtime น้อยสุด) ก่อน
+        total = sum(sz for _, sz, _ in entries)
+        for _, sz, p in entries:
+            if total <= max_bytes:
+                break
+            try:
+                os.remove(p)
+                total -= sz
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _download_table(file_id: str):
     """ดาวน์โหลดไฟล์ตารางลง cache ครั้งเดียว คืน (path, ชนิด csv/xlsx, ชื่อไฟล์)"""
     meta = drive().files().get(
@@ -252,6 +314,7 @@ def _download_table(file_id: str):
             raw = drive().files().get_media(fileId=file_id).execute()
             with open(path, "wb") as f:
                 f.write(raw)
+        _evict_cache_if_needed()
     return path, kind, name
 
 
@@ -846,14 +909,14 @@ ALL_TOOLS = [
     move_file,
     rename_file,
     get_link,
-    read_file,
-    summarize_file,
-    ask_document,
-    file_stats,
-    query_file,
-    aggregate_file,
-    make_chart,
-    make_chart_from_data,
+    _instrumented(read_file),
+    _instrumented(summarize_file),
+    _instrumented(ask_document),
+    _instrumented(file_stats),
+    _instrumented(query_file),
+    _instrumented(aggregate_file),
+    _instrumented(make_chart),
+    _instrumented(make_chart_from_data),
     make_infographic,
     trash_file,
 ]
