@@ -88,6 +88,26 @@ def _already_processing(message_id: str) -> bool:
         return False
 
 
+# กันงานหนัก (Gemini + อ่านไฟล์ใหญ่หลายไฟล์) รันซ้อนกันต่อ user/กลุ่มเดียวกัน
+# เคยเจอ: ผู้ใช้ถามคำถามใหญ่ แล้วใจร้อนถามซ้ำ/ถามคำถามอื่นระหว่างรอ -> 2 thread แชร์
+# session เดียวกันแล้วรัน Gemini+pandas พร้อมกัน แรมพุ่งเป็นสองเท่าโดยไม่เกี่ยวกับขนาดไฟล์เลย
+_active_targets: set[str] = set()
+_active_lock = threading.Lock()
+
+
+def _try_start(target: str) -> bool:
+    with _active_lock:
+        if target in _active_targets:
+            return False
+        _active_targets.add(target)
+        return True
+
+
+def _finish(target: str) -> None:
+    with _active_lock:
+        _active_targets.discard(target)
+
+
 def _strip_self_mention(event, text: str):
     """ถ้าข้อความ @mention ตัวบอท คืนข้อความที่ตัดส่วน mention ออกแล้ว; ไม่ได้ mention คืน None"""
     mention = getattr(event.message, "mention", None)
@@ -136,6 +156,10 @@ def on_text(event):
         reply_text(event.reply_token, "ล้างประวัติสนทนาแล้วครับ")
         return
 
+    if not _try_start(target):
+        reply_text(event.reply_token, "คำถามก่อนหน้ายังทำอยู่ครับ รอผลก่อนแล้วค่อยถามใหม่นะครับ")
+        return
+
     # โมเดลอาจใช้เวลาคิดนานกว่า reply token จะทัน —
     # ตอบรับก่อน แล้วประมวลผลใน background ส่งผลผ่าน push message
     reply_text(event.reply_token, "รับทราบ กำลังดำเนินการ...")
@@ -173,6 +197,8 @@ def on_text(event):
             answer = bot.chat(target, prefix + text)
         except Exception as e:  # noqa: BLE001
             answer = f"เกิดข้อผิดพลาด: {e}"
+        finally:
+            _finish(target)
         done.set()
         push_text(target, answer, drive_tools.pop_pending_images())
 
