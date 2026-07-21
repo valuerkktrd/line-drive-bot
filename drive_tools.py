@@ -590,6 +590,33 @@ def read_file(file_id: str) -> str:
     return f"เนื้อหาไฟล์ '{name}':\n{text}"
 
 
+def summarize_file(file_id: str, focus: str = "") -> str:
+    """อ่านไฟล์แล้วสรุปเป็นข้อความสั้นๆ ทันที (ไม่คืนข้อมูลดิบ) — ใช้แทน read_file เมื่อต้องอ่าน
+    หลายไฟล์ในคำถามเดียว (เช่น "อ่านสรุปทุกไฟล์ในโฟลเดอร์") เพราะเนื้อหาดิบของแต่ละไฟล์จะถูกใช้แล้วทิ้งทันที
+    ไม่ค้างอยู่ในบทสนทนาหลัก — ประหยัดทั้งแรมและ context เมื่อต้องประมวลผลหลายไฟล์ต่อเนื่อง
+
+    Args:
+        file_id: ID ของไฟล์
+        focus: สิ่งที่อยากรู้จากไฟล์นี้เป็นพิเศษ (เว้นว่าง = สรุปภาพรวม)
+    """
+    from google import genai
+
+    raw = read_file(file_id)
+    prompt = (
+        "นี่คือเนื้อหาไฟล์หนึ่งไฟล์ ช่วยสรุปสาระสำคัญให้กระชับที่สุด ไม่เกิน 4-5 บรรทัด"
+        + (f" โดยเน้นเรื่อง: {focus}" if focus else "")
+        + f"\n\n{raw}"
+    )
+    del raw
+    resp = genai.Client().models.generate_content(
+        model=os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite"),
+        contents=prompt,
+    )
+    del prompt
+    _release_memory()
+    return (resp.text or "").strip() or "(ไฟล์นี้สรุปไม่ได้ อาจว่างเปล่า)"
+
+
 # ---------- รูปภาพ (กราฟ / infographic) ส่งกลับเข้า LINE ----------
 
 IMG_DIR = os.path.join(_CACHE_DIR, "img")
@@ -820,6 +847,7 @@ ALL_TOOLS = [
     rename_file,
     get_link,
     read_file,
+    summarize_file,
     ask_document,
     file_stats,
     query_file,
