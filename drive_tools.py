@@ -301,6 +301,16 @@ def _safe_remove(path: str) -> None:
         pass
 
 
+def _genai_client():
+    """genai.Client() พร้อม timeout — SDK ใช้ httpx ข้างใน ไม่ยึด socket.setdefaulttimeout()
+    ของ Python (อันนั้นครอบคลุมแค่ googleapiclient/httplib2 ของ Drive กับ Sheets)
+    เจอ ask_document ค้างไม่มีกำหนดจริงบน production เพราะไม่เคยตั้ง timeout ให้ genai.Client เลย"""
+    from google import genai
+    from google.genai import types as gtypes
+
+    return genai.Client(http_options=gtypes.HttpOptions(timeout=120_000))
+
+
 def _download_table(file_id: str):
     """ดาวน์โหลดไฟล์ตารางลงไฟล์ชั่วคราว คืน (path, ชนิด csv/xlsx, ชื่อไฟล์)
     ผู้เรียก**ต้องลบไฟล์เองหลังใช้เสร็จ** (try/finally + _safe_remove) — ไม่แคชถาวรแล้ว
@@ -714,8 +724,6 @@ def summarize_file(file_id: str, focus: str = "") -> str:
         file_id: ID ของไฟล์
         focus: สิ่งที่อยากรู้จากไฟล์นี้เป็นพิเศษ (เว้นว่าง = สรุปภาพรวม)
     """
-    from google import genai
-
     raw = read_file(file_id)
     prompt = (
         "นี่คือเนื้อหาไฟล์หนึ่งไฟล์ ช่วยสรุปสาระสำคัญให้กระชับที่สุด ไม่เกิน 4-5 บรรทัด"
@@ -723,7 +731,7 @@ def summarize_file(file_id: str, focus: str = "") -> str:
         + f"\n\n{raw}"
     )
     del raw
-    resp = genai.Client().models.generate_content(
+    resp = _genai_client().models.generate_content(
         model=os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite"),
         contents=prompt,
     )
@@ -872,9 +880,7 @@ def make_infographic(content: str) -> str:
     Args:
         content: สรุปหัวข้อ/ประเด็น/ตัวเลขเด่นที่จะให้ปรากฏในภาพ (เขียนเป็นข้อๆ)
     """
-    from google import genai
-
-    g = genai.Client()
+    g = _genai_client()
     try:
         resp = g.models.generate_content(
             model=os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
@@ -905,7 +911,6 @@ def ask_document(file_id: str, question: str) -> str:
         file_id: ID ของไฟล์เอกสาร
         question: สิ่งที่อยากรู้ เช่น "สรุปสาระสำคัญ" หรือคำถามเจาะจงจากเนื้อหา
     """
-    from google import genai
     from google.genai import types as gtypes
 
     meta = drive().files().get(
@@ -934,7 +939,7 @@ def ask_document(file_id: str, question: str) -> str:
     if len(raw) > 18_000_000:
         return f"ไฟล์ '{name}' ใหญ่เกิน 18MB — ยังไม่รองรับ ลองแยกไฟล์เป็นส่วนๆ"
 
-    g = genai.Client()
+    g = _genai_client()
     resp = g.models.generate_content(
         model=os.environ.get("GEMINI_MODEL", "gemini-3.5-flash"),
         contents=[part, f"จากเอกสาร '{name}' นี้: {question}\nตอบเป็นภาษาไทย กระชับ อ้างอิงเนื้อหาจริงในเอกสาร"],

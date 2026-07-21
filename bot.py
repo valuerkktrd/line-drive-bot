@@ -7,7 +7,9 @@ from google.genai import types
 
 from drive_tools import ALL_TOOLS
 
-client = genai.Client()  # อ่าน GEMINI_API_KEY จาก env
+# timeout ชัดเจน — genai.Client ใช้ httpx ข้างใน ไม่ยึด socket.setdefaulttimeout() ของ Python
+# เจอ ask_document ค้างไม่มีกำหนดมาแล้วเพราะไม่มี timeout เลย (ดู drive_tools._genai_client)
+client = genai.Client(http_options=types.HttpOptions(timeout=120_000))  # อ่าน GEMINI_API_KEY จาก env
 
 # flash-lite: โควตาฟรีต่อวันสูงกว่า 3.5-flash มาก (3.5-flash ฟรีแค่ ~20 ครั้ง/วัน)
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
