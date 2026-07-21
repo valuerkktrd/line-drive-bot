@@ -547,9 +547,16 @@ def read_file(file_id: str) -> str:
         raw = drive().files().export(fileId=file_id, mimeType="text/plain").execute()
         text = raw.decode("utf-8", errors="replace")
     elif mt in TABLE_MIMES_XLSX:
-        df, _ = _load_df(file_id)  # รองรับ .xlsx / .xls เก่า / .xls ปลอมที่เป็น CSV
-        text = f"({len(df):,} แถว)\n" + df.head(500).to_csv(index=False).rstrip()
-        if len(df) > 500:
+        import pandas as pd
+
+        # อ่านทีละ chunk แทนโหลดทั้งไฟล์ — ไฟล์จริงมีถึง ~96,812 แถว โหลดเต็มพังแรม 512MB
+        total = 0
+        head_df = None
+        for chunk, _ in _iter_table_chunks(file_id):
+            head_df = chunk.head(500) if head_df is None else pd.concat([head_df, chunk]).head(500)
+            total += len(chunk)
+        text = f"({total:,} แถว)\n" + (head_df.to_csv(index=False).rstrip() if head_df is not None else "")
+        if total > 500:
             text += "\n...(ตัดที่ 500 แถว)"
     elif mt.startswith("text/") or mt in ("application/json", "application/csv"):
         raw = drive().files().get_media(fileId=file_id).execute()

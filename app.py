@@ -72,6 +72,21 @@ TRIGGER = os.environ.get("BOT_TRIGGER", "บอท")
 _recent_group_files: dict[str, dict] = defaultdict(dict)
 _RECENT_FILES_MAX = 100
 
+# กัน LINE ส่ง webhook ซ้ำ (redelivery เปิดอยู่ — cold start ทำให้ reply ช้าจน LINE คิดว่า timeout แล้วส่งซ้ำ)
+# ถ้าไม่กัน จะมี 2 thread รัน Gemini + อ่านไฟล์ใหญ่พร้อมกัน แรมพุ่งเป็นสองเท่า
+_seen_message_ids: set[str] = set()
+_seen_lock = threading.Lock()
+
+
+def _already_processing(message_id: str) -> bool:
+    with _seen_lock:
+        if message_id in _seen_message_ids:
+            return True
+        _seen_message_ids.add(message_id)
+        if len(_seen_message_ids) > 500:
+            _seen_message_ids.clear()
+        return False
+
 
 def _strip_self_mention(event, text: str):
     """ถ้าข้อความ @mention ตัวบอท คืนข้อความที่ตัดส่วน mention ออกแล้ว; ไม่ได้ mention คืน None"""
@@ -96,6 +111,9 @@ def _target_id(event) -> tuple[str, bool]:
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def on_text(event):
+    if _already_processing(event.message.id):
+        return  # LINE ส่ง webhook นี้ซ้ำ (redelivery) — กำลังประมวลผลรอบแรกอยู่แล้ว
+
     target, is_group = _target_id(event)
     text = event.message.text.strip()
 
