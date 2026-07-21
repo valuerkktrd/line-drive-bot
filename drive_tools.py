@@ -102,9 +102,11 @@ def sheets():
 
 
 def _export_big_sheet_csv(file_id: str, path: str) -> None:
-    """Google Sheets ใหญ่เกินลิมิต export 10MB — ดึงผ่าน Sheets API ทีละช่วงแล้วเขียนเป็น CSV"""
+    """Google Sheets ใหญ่เกินลิมิต export 10MB — ดึงผ่าน Sheets API ทีละช่วงแล้วเขียนเป็น CSV
+    ไม่เคย instrument มาก่อน — เป็นจุดบอดจุดสุดท้ายที่ยังไม่เห็น log ตอน production crash กลางฟังก์ชันนี้พอดี"""
     import csv
 
+    print(f"[sheet-export-start] rss={_rss_mb():.0f}MB file_id={file_id}", flush=True)
     meta = sheets().spreadsheets().get(
         spreadsheetId=file_id,
         fields="sheets(properties(title,gridProperties(rowCount)))",
@@ -112,21 +114,28 @@ def _export_big_sheet_csv(file_id: str, path: str) -> None:
     props = meta["sheets"][0]["properties"]
     title = props["title"]
     total_rows = props["gridProperties"]["rowCount"]
+    print(f"[sheet-export-meta] rss={_rss_mb():.0f}MB title={title!r} total_rows={total_rows}", flush=True)
 
     chunk = 20000
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         r = 1
+        i = 0
         while r <= total_rows:
             rng = f"'{title}'!A{r}:AZ{min(r + chunk - 1, total_rows)}"
             vals = sheets().spreadsheets().values().get(
                 spreadsheetId=file_id, range=rng,
                 valueRenderOption="UNFORMATTED_VALUE",
             ).execute().get("values", [])
+            i += 1
+            print(f"[sheet-export-batch] rss={_rss_mb():.0f}MB #{i} range={rng} rows_fetched={len(vals)}",
+                  flush=True)
             if not vals:
                 break
             w.writerows(vals)
+            del vals
             r += chunk
+    print(f"[sheet-export-done] rss={_rss_mb():.0f}MB file_id={file_id}", flush=True)
 
 
 FILE_FIELDS = "id, name, mimeType, modifiedTime, size, parents, webViewLink"
