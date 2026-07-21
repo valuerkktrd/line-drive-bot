@@ -44,6 +44,10 @@ def chat(user_id: str, text: str) -> str:
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
                 tools=ALL_TOOLS,  # ฟังก์ชัน Python ธรรมดา — SDK สร้าง schema และรัน loop ให้เอง
+                # SDK จำกัด auto function-calling ไว้แค่ 10 remote call โดย default — งานที่ต้องวน
+                # เรียก tool ต่อไฟล์ (เช่น aggregate_file ทีละสาขา 13-15 ไฟล์) เกิน 10 จะโดนตัดกลางคัน
+                # เงียบๆ ไม่มี error แค่ได้คำตอบว่างกลับมา (บอทจะตอบ "(ดำเนินการเสร็จแล้ว)" ทั้งที่ยังไม่เสร็จ)
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(maximum_remote_calls=50),
             ),
         )
         _chats[user_id] = session
