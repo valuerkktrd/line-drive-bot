@@ -5,6 +5,20 @@ import json
 import os
 import re
 
+
+def _release_memory():
+    """คืนแรมที่ python ปล่อยแล้วกลับให้ OS จริงๆ — แค่ gc.collect() ไม่พอ
+    เพราะ glibc malloc เก็บ arena ที่ว่างไว้เอง ไม่คืน OS เอง ต้องเรียก malloc_trim ตรงๆ
+    (สำคัญมากบน Render 512MB: อ่านไฟล์ใหญ่หลายไฟล์ต่อเนื่องในคำขอเดียว ถ้าไม่ trim แรมจะสะสมพุ่งได้
+    ทั้งที่แต่ละไฟล์ปล่อย reference หมดแล้ว)"""
+    import gc
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:  # noqa: BLE001
+        pass  # Windows/mac ไม่มี libc.so.6 (dev เครื่อง) — ข้ามไปเฉยๆ ไม่กระทบการทำงาน
+
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -404,6 +418,7 @@ def file_stats(file_id: str, sheet: str = "") -> str:
             cols = ", ".join(f"{c}({t})" for c, t in chunk.dtypes.astype(str).items())
             sample = chunk.head(5).to_string(index=False)
         total += len(chunk)
+    _release_memory()
     return f"ไฟล์ '{name}': {total:,} แถว\nคอลัมน์: {cols}\nตัวอย่าง 5 แถวแรก:\n{sample}"
 
 
@@ -437,6 +452,7 @@ def query_file(file_id: str, filter_expr: str = "", columns: str = "",
     out = out_df.to_string(index=False)
     if len(out) > 8000:
         out = out[:8000] + "\n...(ตัดผลลัพธ์)"
+    _release_memory()
     return f"พบ {total:,} แถวใน '{name}'\n{out}"
 
 
@@ -524,6 +540,7 @@ def aggregate_file(file_id: str, operation: str, column: str = "",
         body = str(result.iloc[0]) if len(result) else "NaN"
 
     cond = f" (เงื่อนไข: {filter_expr})" if filter_expr else ""
+    _release_memory()
     return f"{op} ของ '{name}'{cond}:\n{body}"
 
 
@@ -550,14 +567,17 @@ def read_file(file_id: str) -> str:
         import pandas as pd
 
         # อ่านทีละ chunk แทนโหลดทั้งไฟล์ — ไฟล์จริงมีถึง ~96,812 แถว โหลดเต็มพังแรม 512MB
+        # cap 200 แถว (ลดจาก 500) — งานที่อ่านหลายไฟล์รวดในคำขอเดียว (เช่น "อ่านสรุปทั้ง 10 ไฟล์")
+        # ไม่งั้นข้อความสะสมในบทสนทนาโตเกินไป
+        PREVIEW_ROWS = 200
         total = 0
         head_df = None
         for chunk, _ in _iter_table_chunks(file_id):
-            head_df = chunk.head(500) if head_df is None else pd.concat([head_df, chunk]).head(500)
+            head_df = chunk.head(PREVIEW_ROWS) if head_df is None else pd.concat([head_df, chunk]).head(PREVIEW_ROWS)
             total += len(chunk)
         text = f"({total:,} แถว)\n" + (head_df.to_csv(index=False).rstrip() if head_df is not None else "")
-        if total > 500:
-            text += "\n...(ตัดที่ 500 แถว)"
+        if total > PREVIEW_ROWS:
+            text += f"\n...(ตัดที่ {PREVIEW_ROWS} แถว)"
     elif mt.startswith("text/") or mt in ("application/json", "application/csv"):
         raw = drive().files().get_media(fileId=file_id).execute()
         text = raw.decode("utf-8", errors="replace")
@@ -566,6 +586,7 @@ def read_file(file_id: str) -> str:
 
     if len(text) > MAX_READ_CHARS:
         text = text[:MAX_READ_CHARS] + f"\n...(ตัดเนื้อหา ไฟล์ยาวเกิน {MAX_READ_CHARS} ตัวอักษร)"
+    _release_memory()
     return f"เนื้อหาไฟล์ '{name}':\n{text}"
 
 
