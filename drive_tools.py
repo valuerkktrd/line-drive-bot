@@ -253,16 +253,15 @@ TABLE_MIMES_XLSX = (
 _CACHE_MAX_BYTES = 100 * 1024 * 1024  # 100MB
 
 
-def _evict_cache_if_needed(max_bytes: int = _CACHE_MAX_BYTES) -> None:
-    """ไฟล์ตารางที่โหลดแคชไว้ใน _CACHE_DIR ไม่เคยถูกลบมาก่อน — ทดสอบเจอสะสมได้ถึง 165MB/24 ไฟล์
-    บน container ที่ Render จำกัดแรมด้วย cgroup, page cache ของไฟล์ในดิสก์นับรวมในโควตาแรม 512MB ด้วย
-    (ไม่ใช่แค่ heap ของ python) — ต่อให้ pandas อ่านแบบ chunk ประหยัดแรมแค่ไหน ถ้าดาวน์โหลด+แคช
-    ไฟล์ 10-15 ไฟล์ (ไฟล์ละไม่กี่ MB ถึง 15MB) สะสมไม่มีเพดาน ก็ดันแรมรวมของ container เกินได้เอง
-    ไล่ลบไฟล์เก่าสุดก่อน (LRU) จนขนาดรวมต่ำกว่าเพดาน"""
+def _evict_cache_if_needed(directory: str, max_bytes: int = _CACHE_MAX_BYTES) -> None:
+    """กันไฟล์สะสมไม่มีเพดานใน directory ที่ระบุ — บน container ที่ Render จำกัดแรมด้วย cgroup,
+    page cache ของไฟล์ในดิสก์นับรวมในโควตาแรม 512MB ด้วย (ไม่ใช่แค่ heap ของ python)
+    ไล่ลบไฟล์เก่าสุดก่อน (LRU) จนขนาดรวมต่ำกว่าเพดาน — ทำหน้าที่เป็น backstop เผื่อไฟล์ชั่วคราว
+    ค้างจาก process ที่โดน OOM kill กลางคัน (try/finally ไม่ทันทำงาน)"""
     try:
         entries = []
-        for fname in os.listdir(_CACHE_DIR):
-            p = os.path.join(_CACHE_DIR, fname)
+        for fname in os.listdir(directory):
+            p = os.path.join(directory, fname)
             if os.path.isfile(p):
                 entries.append((os.path.getmtime(p), os.path.getsize(p), p))
         entries.sort()  # เก่าสุด (mtime น้อยสุด) ก่อน
@@ -279,15 +278,27 @@ def _evict_cache_if_needed(max_bytes: int = _CACHE_MAX_BYTES) -> None:
         pass
 
 
+def _safe_remove(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def _download_table(file_id: str):
-    """ดาวน์โหลดไฟล์ตารางลง cache ครั้งเดียว คืน (path, ชนิด csv/xlsx, ชื่อไฟล์)"""
+    """ดาวน์โหลดไฟล์ตารางลงไฟล์ชั่วคราว คืน (path, ชนิด csv/xlsx, ชื่อไฟล์)
+    ผู้เรียก**ต้องลบไฟล์เองหลังใช้เสร็จ** (try/finally + _safe_remove) — ไม่แคชถาวรแล้ว
+    เดิมแคชค้างไว้ตามชื่อไฟล์+เวอร์ชัน ทำให้สะสมได้ถึง 165MB/24 ไฟล์ในการทดสอบ ซึ่งเสี่ยงโดน
+    Render นับรวมในโควตาแรม 512MB (page cache) แม้ heap ของ python เองจะประหยัดแค่ไหนก็ตาม
+    เปลี่ยนเป็นไฟล์ชั่วคราวที่มีอยู่แค่ระหว่างอ่านไฟล์นั้นๆ เท่านั้น ไม่สะสมข้ามไฟล์/ข้ามคำขอ"""
+    import tempfile
+
     print(f"[dl-start]  rss={_rss_mb():.0f}MB file_id={file_id}", flush=True)
     meta = drive().files().get(
-        fileId=file_id, fields="name, mimeType, md5Checksum, modifiedTime",
+        fileId=file_id, fields="name, mimeType",
         supportsAllDrives=True,
     ).execute()
     mt, name = meta["mimeType"], meta["name"]
-    ver = (meta.get("md5Checksum") or meta.get("modifiedTime", "")).replace(":", "")
     print(f"[dl-meta]   rss={_rss_mb():.0f}MB name={name!r} mt={mt}", flush=True)
 
     if mt == "application/vnd.google-apps.spreadsheet":
@@ -300,8 +311,9 @@ def _download_table(file_id: str):
         raise ValueError(f"ไฟล์ '{name}' ประเภท {mt} ไม่ใช่ตาราง (รองรับ Sheets/Excel/CSV)")
 
     os.makedirs(_CACHE_DIR, exist_ok=True)
-    path = os.path.join(_CACHE_DIR, f"{file_id}_{ver}.{kind}")
-    if not os.path.exists(path):
+    fd, path = tempfile.mkstemp(suffix=f".{kind}", dir=_CACHE_DIR)
+    os.close(fd)
+    try:
         if mt == "application/vnd.google-apps.spreadsheet":
             try:
                 raw = drive().files().export(fileId=file_id, mimeType="text/csv").execute()
@@ -318,7 +330,10 @@ def _download_table(file_id: str):
             print(f"[dl-fetched] rss={_rss_mb():.0f}MB bytes={len(raw)}", flush=True)
             with open(path, "wb") as f:
                 f.write(raw)
-        _evict_cache_if_needed()
+    except Exception:
+        _safe_remove(path)
+        raise
+    _evict_cache_if_needed(_CACHE_DIR)  # กวาดไฟล์ชั่วคราวเก่าที่อาจค้างจาก process ก่อนหน้า
     return path, kind, name
 
 
@@ -369,16 +384,19 @@ def _load_df(file_id: str, sheet: str = "", columns: list | None = None):
     import pandas as pd
 
     path, kind, name = _download_table(file_id)
-    if kind == "xlsx":
-        try:
-            df = pd.read_excel(path, sheet_name=(sheet or 0), engine="calamine",
-                               usecols=columns or None)
-        except Exception:
-            # .xls ปลอม (จริงๆ เป็น CSV หรือ HTML) — พบบ่อยในไฟล์ export จากระบบราชการ
+    try:
+        if kind == "xlsx":
+            try:
+                df = pd.read_excel(path, sheet_name=(sheet or 0), engine="calamine",
+                                   usecols=columns or None)
+            except Exception:
+                # .xls ปลอม (จริงๆ เป็น CSV หรือ HTML) — พบบ่อยในไฟล์ export จากระบบราชการ
+                df = _read_csv_flex(path, columns)
+        else:
             df = _read_csv_flex(path, columns)
-    else:
-        df = _read_csv_flex(path, columns)
-    return _clean_df(df), name
+        return _clean_df(df), name
+    finally:
+        _safe_remove(path)
 
 
 def _file_decodes(path: str, enc: str) -> bool:
@@ -443,15 +461,18 @@ def _iter_table_chunks(file_id: str, sheet: str = "", columns: list | None = Non
     import pandas as pd
 
     path, kind, name = _download_table(file_id)
-    if kind == "xlsx":
-        try:
-            df = pd.read_excel(path, sheet_name=(sheet or 0), engine="calamine", usecols=columns or None)
-            yield _clean_df(df), name
-            return
-        except Exception:  # noqa: BLE001
-            pass  # .xls ปลอม (จริงๆ เป็น CSV) — อ่านทาง CSV แบบ chunk ด้านล่าง
-    for chunk in _iter_csv_chunks(path, columns, chunksize):
-        yield chunk, name
+    try:
+        if kind == "xlsx":
+            try:
+                df = pd.read_excel(path, sheet_name=(sheet or 0), engine="calamine", usecols=columns or None)
+                yield _clean_df(df), name
+                return
+            except Exception:  # noqa: BLE001
+                pass  # .xls ปลอม (จริงๆ เป็น CSV) — อ่านทาง CSV แบบ chunk ด้านล่าง
+        for chunk in _iter_csv_chunks(path, columns, chunksize):
+            yield chunk, name
+    finally:
+        _safe_remove(path)
 
 
 def _peek_columns(file_id: str, sheet: str = "") -> list | None:
@@ -459,6 +480,7 @@ def _peek_columns(file_id: str, sheet: str = "") -> list | None:
     เมื่อโหลดไม่สำเร็จคืน None (ผู้เรียกจะ fallback ไปโหลดแบบเต็มคอลัมน์เหมือนเดิม)"""
     import pandas as pd
 
+    path = None
     try:
         path, kind, name = _download_table(file_id)
         if kind == "xlsx":
@@ -469,6 +491,9 @@ def _peek_columns(file_id: str, sheet: str = "") -> list | None:
         return list(_read_csv_flex(path, nrows=0).columns)
     except Exception:  # noqa: BLE001
         return None
+    finally:
+        if path:
+            _safe_remove(path)
 
 
 def _apply_filter(df, filter_expr: str):
@@ -706,6 +731,7 @@ def _queue_image(png_bytes: bytes) -> str:
     name = f"{uuid4().hex}.png"
     with open(os.path.join(IMG_DIR, name), "wb") as f:
         f.write(png_bytes)
+    _evict_cache_if_needed(IMG_DIR, max_bytes=20 * 1024 * 1024)  # กราฟค้างสะสมไม่มีเพดานเหมือนกัน
     url = f"{PUBLIC_BASE_URL}/img/{name}"
     _pending_images.append(url)
     return url
