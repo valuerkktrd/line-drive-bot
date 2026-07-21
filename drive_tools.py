@@ -281,12 +281,14 @@ def _evict_cache_if_needed(max_bytes: int = _CACHE_MAX_BYTES) -> None:
 
 def _download_table(file_id: str):
     """ดาวน์โหลดไฟล์ตารางลง cache ครั้งเดียว คืน (path, ชนิด csv/xlsx, ชื่อไฟล์)"""
+    print(f"[dl-start]  rss={_rss_mb():.0f}MB file_id={file_id}", flush=True)
     meta = drive().files().get(
         fileId=file_id, fields="name, mimeType, md5Checksum, modifiedTime",
         supportsAllDrives=True,
     ).execute()
     mt, name = meta["mimeType"], meta["name"]
     ver = (meta.get("md5Checksum") or meta.get("modifiedTime", "")).replace(":", "")
+    print(f"[dl-meta]   rss={_rss_mb():.0f}MB name={name!r} mt={mt}", flush=True)
 
     if mt == "application/vnd.google-apps.spreadsheet":
         kind = "csv"
@@ -303,6 +305,7 @@ def _download_table(file_id: str):
         if mt == "application/vnd.google-apps.spreadsheet":
             try:
                 raw = drive().files().export(fileId=file_id, mimeType="text/csv").execute()
+                print(f"[dl-fetched] rss={_rss_mb():.0f}MB bytes={len(raw)}", flush=True)
                 with open(path, "wb") as f:
                     f.write(raw)
             except Exception as e:  # noqa: BLE001
@@ -312,6 +315,7 @@ def _download_table(file_id: str):
                     raise
         else:
             raw = drive().files().get_media(fileId=file_id).execute()
+            print(f"[dl-fetched] rss={_rss_mb():.0f}MB bytes={len(raw)}", flush=True)
             with open(path, "wb") as f:
                 f.write(raw)
         _evict_cache_if_needed()
@@ -407,13 +411,20 @@ def _iter_csv_chunks(path: str, columns: list | None = None, chunksize: int = 20
     sep = max([",", "\t", ";", "|"], key=line.count)
     enc = next((e for e in ("utf-8-sig", "cp874", "utf-16") if _file_decodes(path, e)), "utf-8-sig")
 
+    i = 0
     try:
         for chunk in pd.read_csv(path, usecols=columns or None, encoding=enc, sep=sep, chunksize=chunksize):
+            i += 1
+            print(f"[chunk] rss={_rss_mb():.0f}MB #{i} rows={len(chunk)} cols={len(chunk.columns)} "
+                  f"file={os.path.basename(path)}", flush=True)
             yield _clean_df(chunk)
         return
     except ValueError:
         try:
             for chunk in pd.read_csv(path, encoding=enc, sep=sep, chunksize=chunksize):
+                i += 1
+                print(f"[chunk] rss={_rss_mb():.0f}MB #{i} rows={len(chunk)} cols={len(chunk.columns)} "
+                      f"file={os.path.basename(path)} (full-width fallback)", flush=True)
                 yield _clean_df(chunk)
             return
         except Exception:  # noqa: BLE001
