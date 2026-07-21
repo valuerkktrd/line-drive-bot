@@ -134,6 +134,7 @@ def _export_big_sheet_csv(file_id: str, path: str) -> None:
                 break
             w.writerows(vals)
             del vals
+            _release_memory()  # RSS โตต่อเนื่อง ~19MB/batch ไม่เคยลดเลยถ้าไม่ trim — พังแน่นอนที่ไฟล์ใหญ่พอ
             r += chunk
     print(f"[sheet-export-done] rss={_rss_mb():.0f}MB file_id={file_id}", flush=True)
 
