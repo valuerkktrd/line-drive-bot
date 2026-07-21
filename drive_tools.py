@@ -4,6 +4,12 @@ import io
 import json
 import os
 import re
+import socket
+
+# กัน Google API call ค้างไม่มีกำหนดตอนเน็ตสะดุด/ช้าผิดปกติ — ไม่งั้น thread ที่ประมวลผลอยู่จะไม่มีวัน
+# ไปถึง finally ที่ปลด _active_targets lock ใน app.py เลย ผู้ใช้จะโดนล็อกไม่ให้ถามใหม่ตลอดไปจนกว่า
+# process จะรีสตาร์ท — ตั้ง timeout ให้ยกเลิกแล้ว raise exception แทน จะได้ตอบ error ให้ผู้ใช้และปลดล็อกได้
+socket.setdefaulttimeout(60)
 
 
 def _release_memory():

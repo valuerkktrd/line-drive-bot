@@ -3,6 +3,7 @@
 import mimetypes
 import os
 import threading
+import time
 from collections import defaultdict
 
 from dotenv import load_dotenv
@@ -91,21 +92,26 @@ def _already_processing(message_id: str) -> bool:
 # กันงานหนัก (Gemini + อ่านไฟล์ใหญ่หลายไฟล์) รันซ้อนกันต่อ user/กลุ่มเดียวกัน
 # เคยเจอ: ผู้ใช้ถามคำถามใหญ่ แล้วใจร้อนถามซ้ำ/ถามคำถามอื่นระหว่างรอ -> 2 thread แชร์
 # session เดียวกันแล้วรัน Gemini+pandas พร้อมกัน แรมพุ่งเป็นสองเท่าโดยไม่เกี่ยวกับขนาดไฟล์เลย
-_active_targets: set[str] = set()
+# เก็บเวลาที่เริ่มงานไว้ด้วย (ไม่ใช่แค่ set) — เคยเจอ thread ค้างตอน Google API เน็ตสะดุด (ไม่ crash
+# ไม่ throw แค่ค้างเงียบๆ) ทำให้ lock ไม่มีวันถูกปลด ผู้ใช้ติดล็อกถามซ้ำไม่ได้ตลอดไปจนกว่า process จะรีสตาร์ท
+# ถือว่า lock ที่ค้างเกิน STALE_LOCK_SECS เป็นของค้าง ปล่อยให้เริ่มงานใหม่ได้
+_active_targets: dict[str, float] = {}
 _active_lock = threading.Lock()
+STALE_LOCK_SECS = 15 * 60  # งานจริงที่สุด (13-15 ไฟล์) ก็ไม่ควรเกินนี้ต่อให้ Render ช้าแค่ไหน
 
 
 def _try_start(target: str) -> bool:
     with _active_lock:
-        if target in _active_targets:
+        started = _active_targets.get(target)
+        if started is not None and time.time() - started < STALE_LOCK_SECS:
             return False
-        _active_targets.add(target)
+        _active_targets[target] = time.time()
         return True
 
 
 def _finish(target: str) -> None:
     with _active_lock:
-        _active_targets.discard(target)
+        _active_targets.pop(target, None)
 
 
 def _strip_self_mention(event, text: str):
