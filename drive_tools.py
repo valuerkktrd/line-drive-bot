@@ -767,6 +767,103 @@ def pop_pending_images() -> list[str]:
     return out
 
 
+# ---------- คำนวณราคาประเมินที่ดิน (สูตรกรมธนารักษ์ — ยืนยันความแม่นยำ 99.7-99.98% กับข้อมูลจริง
+# หลายสาขา ผ่านเครื่องมือ GDBQC ของผู้ใช้เอง ดู core/price.py ในนั้น — พอร์ตมาใช้ตรงนี้) ----------
+
+_DEPTH_FACTOR_TABLE = [(1.25, 1.0), (2.25, 0.875), (3.25, 0.75), (4.25, 0.625),
+                       (5.25, 0.5375), (6.25, 0.4688), (1e9, 0.4107)]
+_TABLE_NO_FACTOR = {1: 1.0, 3: 1.0, 5: 0.75, 6: 0.65, 41: 0.65, 42: 0.35}
+
+
+def _round_appraisal_price(x: float) -> int:
+    """ปัดราคาตามขั้นบันไดจริงของกรมธนารักษ์ (1/5/10/50/500/5000/50000 ตามช่วงราคา)"""
+    import math
+
+    x = round(float(x), 6)
+    if x <= 0:
+        return 0
+    if x < 10:
+        step = 1
+    elif x < 100:
+        step = 5
+    elif x < 1000:
+        step = 10
+    elif x < 10000:
+        step = 50
+    elif x < 100000:
+        step = 500
+    elif x < 1000000:
+        step = 5000
+    else:
+        step = 50000
+    return int(math.floor(x / step + 0.5)) * step
+
+
+def _depth_factor(depth_r: float, standard_depth: float):
+    if not standard_depth or standard_depth <= 0 or depth_r is None:
+        return None
+    r = depth_r / float(standard_depth)
+    for edge, fac in _DEPTH_FACTOR_TABLE:
+        if r <= edge:
+            return fac
+    return None
+
+
+def calc_land_price(table_no: int, road_value: float = 0, depth_r: float = 0,
+                    standard_depth: float = 40, block_fix: bool = False,
+                    block_low_price: float = 0, block_price: float = 0) -> str:
+    """คำนวณราคาประเมินที่ดิน 1 แปลง (บาท/ตร.วา) ตามสูตรกรมธนารักษ์ — ใช้ตอบคำถามสมมติ/คำนวณ
+    แปลงเดี่ยวๆ ที่ผู้ใช้ยกตัวอย่างมาเอง (ไม่ใช่ดึงจากไฟล์ในฐานข้อมูล) เช่น "table_no 1 ลึก 56 เมตร
+    ราคาถนน 1000 บาท(40ม.) จะได้กี่บาท" — ผลลัพธ์เป็นราคาต่อตารางวา ถ้าอยากได้มูลค่ารวมทั้งแปลง
+    ต้องคูณด้วยเนื้อที่แปลง (ตร.วา) เพิ่มเอง ไม่ได้รวมในนี้
+
+    Args:
+        table_no: TABLE_NO ของแปลง (1, 2, 3, 5, 6, 7, 41, 42 ฯลฯ)
+        road_value: ราคาถนนหน้าแปลง (STREET_VALUE) บาท/ตร.วา ที่ระยะมาตรฐาน (ไม่ต้องใส่ถ้า table_no=2)
+        depth_r: ความลึกแปลงจากแนวถนน (DEPTH_R) หน่วยเมตร — ไม่ต้องใส่ถ้า table_no=2 หรือ block_fix=True
+        standard_depth: ความลึกมาตรฐานของถนนเส้นนี้ (STREET_DEPTH) หน่วยเมตร เว้นว่าง = ใช้ 40 (ค่า default จริง)
+        block_fix: True ถ้าแปลงอ้างอิง BLOCK_FIX (เต็มราคาถนนไม่สนใจความลึก) ยกเว้น table_no=7 ยังคงครึ่งราคา
+        block_low_price: ราคาต่ำสุดของบล็อก (BLOCK_PRICE.LOWEST_PRICE) ถ้ามี — กันราคาต่ำกว่า floor (บล็อก×1.3)
+        block_price: ราคาบล็อก (BLOCK_PRICE.STREET_VALUE) — ใช้เฉพาะ table_no=2 (ตาบอด) เท่านั้น
+    """
+    if table_no == 2:
+        if not block_price:
+            return "table_no=2 (ตาบอด) ใช้ราคาบล็อกตรงๆ ไม่คิดความลึก — กรุณาระบุ block_price ด้วย"
+        return f"ราคาประเมิน ≈ {_round_appraisal_price(block_price):,} บาท/ตร.วา (table_no=2 ใช้ราคาบล็อกเต็ม ไม่คิดความลึก)"
+
+    if not road_value:
+        return "ต้องระบุ road_value (ราคาถนน) ก่อนคำนวณ"
+
+    std = standard_depth if standard_depth and standard_depth > 0 else 40
+
+    if table_no == 7:
+        factor = 0.5
+        raw = 0.5 * road_value
+        detail = "table_no=7 (ทาง) = ครึ่งราคาถนนเสมอ ไม่คิดความลึก"
+    elif block_fix:
+        factor = 1.0
+        raw = road_value
+        detail = "อ้างอิง BLOCK_FIX = เต็มราคาถนน ไม่คิดความลึก"
+    else:
+        df = _depth_factor(depth_r, std)
+        if df is None:
+            return "คำนวณค่าลดทอนตามความลึกไม่ได้ — ตรวจสอบ depth_r/standard_depth"
+        tno_factor = _TABLE_NO_FACTOR.get(table_no, 1.0)
+        factor = df * tno_factor
+        raw = road_value * factor
+        detail = (f"depth_factor={df} (r={depth_r}/{std}={depth_r / std:.3f}) "
+                  f"× table_no_factor={tno_factor}")
+
+    floorv = min(block_low_price * 1.3, road_value) if block_low_price else None
+    final_raw = max(raw, floorv) if floorv else raw
+    price = _round_appraisal_price(final_raw)
+    floor_note = f" (ชนราคาต่ำสุดของบล็อก floor={_round_appraisal_price(floorv)})" \
+        if floorv and final_raw == floorv else ""
+
+    return (f"ราคาประเมิน ≈ {price:,} บาท/ตร.วา{floor_note}\n"
+            f"({detail}: ราคาถนน {road_value:,.0f} × factor {factor:.4f} = {raw:,.2f} → ปัดเป็น {price:,})")
+
+
 def _thai_font():
     import matplotlib
     matplotlib.use("Agg")
@@ -976,6 +1073,7 @@ ALL_TOOLS = [
     _instrumented(make_chart),
     _instrumented(make_chart_from_data),
     make_infographic,
+    calc_land_price,
     trash_file,
 ]
 
