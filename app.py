@@ -162,6 +162,21 @@ def on_text(event):
         reply_text(event.reply_token, "ล้างประวัติสนทนาแล้วครับ")
         return
 
+    if text in ("/สถานะ", "/status"):
+        with _active_lock:
+            started = _active_targets.get(target)
+        if started is None:
+            reply_text(event.reply_token, "ไม่มีงานค้างอยู่ครับ พร้อมรับคำถามใหม่")
+        else:
+            mins = int((time.time() - started) // 60)
+            if time.time() - started >= STALE_LOCK_SECS:
+                reply_text(event.reply_token,
+                           f"งานก่อนหน้าทำงานมา {mins} นาทีแล้ว ดูเหมือนจะค้างนานผิดปกติ "
+                           "— พิมพ์ /reset เพื่อเริ่มใหม่ได้เลยครับ")
+            else:
+                reply_text(event.reply_token, f"ยังทำงานอยู่ครับ ({mins} นาทีที่แล้ว) รอสักครู่นะครับ")
+        return
+
     if not _try_start(target):
         reply_text(event.reply_token, "คำถามก่อนหน้ายังทำอยู่ครับ รอผลก่อนแล้วค่อยถามใหม่นะครับ")
         return
