@@ -191,7 +191,8 @@ def on_text(event):
                     data = MessagingApiBlob(api).get_message_content(quoted_id)
                 fname = _recent_group_files.get(target, {}).get(quoted_id, "ไฟล์แนบจากแชท")
                 mime = mimetypes.guess_type(fname)[0] or "application/octet-stream"
-                f = drive_tools.upload_bytes(bytes(data), fname, mime)
+                f = drive_tools.upload_bytes(bytes(data), fname, mime,
+                                              parent_id=drive_tools.SAVE_COMMAND_FOLDER_ID)
                 prefix = (f"(ระบบ: ผู้ใช้ตอบกลับถึงไฟล์แนบในแชท ระบบบันทึกลง Drive แล้ว "
                           f"ชื่อ '{f['name']}' file_id={f['id']} ลิงก์ {f.get('webViewLink', '')} "
                           f"— ทำตามคำสั่งของผู้ใช้ต่อ เช่น ยืนยันการเก็บ ย้ายโฟลเดอร์ หรือสรุปเนื้อหา) ")

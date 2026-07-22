@@ -66,6 +66,9 @@ from googleapiclient.http import MediaIoBaseUpload
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 ROOT_FOLDER_ID = os.environ["DRIVE_ROOT_FOLDER_ID"]
+# ปลายทางเฉพาะตอนมีคำสั่ง "เก็บไฟล์" ชัดเจน (เช่น reply ไฟล์ในกลุ่มแล้วสั่งเก็บ) — แยกจาก
+# ROOT_FOLDER_ID ซึ่งเป็นโฟลเดอร์หลักสำหรับอัปโหลดอัตโนมัติ/เรียกดูไฟล์ทั่วไป
+SAVE_COMMAND_FOLDER_ID = os.environ.get("SAVE_COMMAND_FOLDER_ID", "1q8pwq_fxMDKkd98MhdIuJV7KV-cKPc-q")
 CLIENT_SECRET_FILE = os.environ.get("GOOGLE_CLIENT_SECRET_FILE", "client_secret.json")
 TOKEN_FILE = os.environ.get("GOOGLE_TOKEN_FILE", "token.json")
 
