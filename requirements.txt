@@ -11,3 +11,4 @@ pandas>=2.2
 python-calamine>=0.2
 matplotlib>=3.9
 lxml>=5.0
+qrcode[pil]>=8.0

@@ -1002,6 +1002,21 @@ def make_infographic(content: str) -> str:
     return "โมเดลรูปภาพไม่คืนรูปมา ลองปรับเนื้อหาแล้วเรียกใหม่"
 
 
+def make_qrcode(text: str) -> str:
+    """สร้าง QR code จากลิงก์หรือข้อความ แล้วส่งรูปกลับเข้าแชททันที
+
+    Args:
+        text: ลิงก์หรือข้อความที่จะเข้ารหัสเป็น QR code
+    """
+    import qrcode
+
+    img = qrcode.make(text)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    _queue_image(buf.getvalue())
+    return "สร้าง QR code เรียบร้อย รูปกำลังถูกส่งในแชท (บอกผู้ใช้สั้นๆ ว่าส่งรูปแล้ว)"
+
+
 def ask_document(file_id: str, question: str) -> str:
     """อ่านเอกสารทั้งไฟล์แล้วตอบคำถาม/สรุป (แบบ NotebookLM) — รองรับ PDF (รวมถึง
     PDF สแกนภาษาไทย), Google Docs, Word (.docx), TXT
@@ -1077,6 +1092,7 @@ ALL_TOOLS = [
     _instrumented(make_chart_from_data),
     make_infographic,
     calc_land_price,
+    make_qrcode,
     trash_file,
 ]
 
