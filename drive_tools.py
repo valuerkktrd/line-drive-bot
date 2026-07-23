@@ -1105,3 +1105,52 @@ def upload_bytes(data: bytes, filename: str, mime_type: str,
     return drive().files().create(
         body=meta, media_body=media, fields=FILE_FIELDS, supportsAllDrives=True
     ).execute()
+
+
+# ---------- บันทึกข้อความในกลุ่ม (log ทุกข้อความ ไม่ใช่ tool ที่โมเดลเรียก — เรียกตรงจาก app.py) ----------
+
+_group_log_sheet_cache: dict[str, str] = {}
+
+
+def _get_or_create_group_log_sheet(group_id: str) -> str:
+    """หา (หรือสร้างใหม่ครั้งแรก) Google Sheet สำหรับ log ข้อความของกลุ่มนี้ — 1 ชีตต่อ 1 กลุ่ม
+    เก็บ spreadsheet id ไว้ในแรมกันค้นหาซ้ำทุกข้อความ (แต่จะหายตอน process รีสตาร์ท ค้นหาใหม่ได้ ไม่เสียหาย)"""
+    if group_id in _group_log_sheet_cache:
+        return _group_log_sheet_cache[group_id]
+
+    name = f"LINE_Log_{group_id}"
+    res = drive().files().list(
+        q=f"name = '{name}' and '{ROOT_FOLDER_ID}' in parents and trashed=false",
+        fields="files(id)", pageSize=1, supportsAllDrives=True,
+    ).execute()
+    files = res.get("files", [])
+    if files:
+        sid = files[0]["id"]
+    else:
+        meta = {"name": name, "mimeType": "application/vnd.google-apps.spreadsheet",
+                 "parents": [ROOT_FOLDER_ID]}
+        f = drive().files().create(body=meta, fields="id").execute()
+        sid = f["id"]
+        sheets().spreadsheets().values().update(
+            spreadsheetId=sid, range="A1", valueInputOption="RAW",
+            body={"values": [["เวลา", "ผู้ส่ง", "ข้อความ"]]},
+        ).execute()
+    _group_log_sheet_cache[group_id] = sid
+    return sid
+
+
+def log_group_message(group_id: str, sender_name: str, text: str) -> None:
+    """บันทึก 1 ข้อความของกลุ่มลงชีต log ของกลุ่มนั้น — ไม่ throw ออกไปข้างนอก (log ผิดพลาดแล้วแค่ print เตือน
+    ไม่ให้กระทบการทำงานหลักของบอท)"""
+    try:
+        sid = _get_or_create_group_log_sheet(group_id)
+        from datetime import datetime, timedelta, timezone
+
+        ts = datetime.now(timezone(timedelta(hours=7))).strftime("%Y-%m-%d %H:%M:%S")
+        sheets().spreadsheets().values().append(
+            spreadsheetId=sid, range="A:C",
+            valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
+            body={"values": [[ts, sender_name, text]]},
+        ).execute()
+    except Exception as e:  # noqa: BLE001
+        print(f"[log-error] rss={_rss_mb():.0f}MB group={group_id} -> {e!r}", flush=True)

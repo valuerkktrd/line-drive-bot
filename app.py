@@ -135,6 +135,30 @@ def _target_id(event) -> tuple[str, bool]:
     return src.user_id, False
 
 
+_member_name_cache: dict[tuple[str, str], str] = {}
+
+
+def _sender_name(event, group_id: str) -> str:
+    """ชื่อที่แสดงของผู้ส่ง — cache ไว้กันเรียก API ซ้ำทุกข้อความ (ชื่อไม่ค่อยเปลี่ยน)"""
+    user_id = getattr(event.source, "user_id", None)
+    if not user_id:
+        return "ไม่ทราบผู้ส่ง"
+    key = (group_id, user_id)
+    if key in _member_name_cache:
+        return _member_name_cache[key]
+    try:
+        with ApiClient(line_config) as api:
+            if event.source.type == "room":
+                prof = MessagingApi(api).get_room_member_profile(group_id, user_id)
+            else:
+                prof = MessagingApi(api).get_group_member_profile(group_id, user_id)
+        name = prof.display_name
+    except Exception:  # noqa: BLE001
+        name = user_id
+    _member_name_cache[key] = name
+    return name
+
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def on_text(event):
     if _already_processing(event.message.id):
@@ -142,6 +166,12 @@ def on_text(event):
 
     target, is_group = _target_id(event)
     text = event.message.text.strip()
+
+    # log ทุกข้อความในกลุ่ม (สมาชิกยินยอมแล้ว) ไม่ใช่แค่ข้อความที่เรียกบอท — ทำก่อนกรอง mention
+    if is_group:
+        sender = _sender_name(event, target)
+        threading.Thread(target=drive_tools.log_group_message,
+                          args=(target, sender, text), daemon=True).start()
 
     # ในกลุ่ม: ตอบเฉพาะเมื่อถูก @mention หรือขึ้นต้นด้วยคำเรียก — ใครเรียกก็ได้
     if is_group:
@@ -240,6 +270,9 @@ def on_file(event):
         fname = (event.message.file_name
                  if isinstance(event.message, FileMessageContent)
                  else f"image_{event.message.id}.jpg")
+        sender = _sender_name(event, user_id)
+        threading.Thread(target=drive_tools.log_group_message,
+                          args=(user_id, sender, f"[ส่งไฟล์แนบ: {fname}]"), daemon=True).start()
         files = _recent_group_files[user_id]
         files[event.message.id] = fname
         while len(files) > _RECENT_FILES_MAX:
